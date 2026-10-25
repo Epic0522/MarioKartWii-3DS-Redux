@@ -1,0 +1,37 @@
+; NW4R EF particles (src/nw4r_ef_draw.cpp): view-space positions, the texture unit 0
+; coordinate with its projective w (GX_TG_POS layers through a 3x4 texture matrix divide
+; per pixel, PICA unit 0 in projection mode), the unit 1 coordinate, the colour-lookup
+; coordinate (unit 2) and the vertex colour.
+.fvec projection[4]
+.constf consts(0.0, 1.0, 0.00392156863, 0.0)
+.out outpos position
+.out outtc texcoord0
+.out outtcw texcoord0w.x
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+.out outcolor color
+.alias inpos v0
+.alias inuv0 v1
+.alias inuv v2
+.alias incolor v3
+.entry effect
+.proc effect
+    mov r0.xyz, inpos
+    mov r0.w, consts.y
+    dp4 r1.x, projection[0], r0
+    dp4 r1.y, projection[1], r0
+    dp4 r1.z, projection[2], r0
+    dp4 r1.w, projection[3], r0
+    mov outpos, r1
+    ; PICA requires all lanes of each output written.
+    mov r2, consts.xxxy
+    mov r2.xy, inuv0.xy
+    mov outtc, r2
+    mov outtcw, inuv0.zzzz
+    mov r2.xy, inuv.xy
+    mov outtc1, r2
+    mov r2.xy, inuv.zw
+    mov outtc2, r2
+    mul outcolor, consts.z, incolor
+    end
+.end

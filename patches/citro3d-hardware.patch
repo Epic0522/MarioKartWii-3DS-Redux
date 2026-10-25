@@ -1,0 +1,547 @@
+diff --git a/source/base.c b/source/base.c
+index 65ca89e..02f6da3 100644
+--- a/source/base.c
++++ b/source/base.c
+@@ -1,5 +1,6 @@
+ #include "internal.h"
+ #include <stdlib.h>
++#include <string.h>
+ #include <c3d/base.h>
+ #include <c3d/effect.h>
+ #include <c3d/uniforms.h>
+@@ -8,6 +9,21 @@ C3D_Context __C3D_Context;
+ 
+ static aptHookCookie hookCookie;
+ 
++// Last effect / TexEnv register values written to the GPU. Setters mark state
++// dirty on every call; identical state is not written again. Invalidated
++// whenever the registers may no longer hold these values.
++static C3D_Effect C3Di_EffectShadow;
++static C3D_TexEnv C3Di_TexEnvShadow[6];
++static bool C3Di_EffectShadowValid;
++static u8 C3Di_TexEnvShadowValid;
++
++void C3Di_InvalidateStateShadows(void)
++{
++	C3Di_EffectShadowValid = false;
++	C3Di_TexEnvShadowValid = 0;
++	C3Di_InvalidateTexShadows();
++}
++
+ __attribute__((weak)) void C3Di_LightEnvUpdate(C3D_LightEnv* env)
+ {
+ 	(void)env;
+@@ -48,6 +64,7 @@ static void C3Di_AptEventHook(APT_HookType hookType, C3D_UNUSED void* param)
+ 		case APTHOOK_ONRESTORE:
+ 		{
+ 			C3Di_RenderQueueEnableVBlank();
++			C3Di_InvalidateStateShadows();
+ 			ctx->flags |= C3DiF_AttrInfo | C3DiF_BufInfo | C3DiF_Effect | C3DiF_FrameBuf
+ 				| C3DiF_Viewport | C3DiF_Scissor | C3DiF_Program | C3DiF_VshCode | C3DiF_GshCode
+ 				| C3DiF_TexAll | C3DiF_TexEnvBuf | C3DiF_TexEnvAll | C3DiF_LightEnv | C3DiF_Gas;
+@@ -97,6 +114,8 @@ bool C3D_Init(size_t cmdBufSize)
+ 	}
+ 
+ 	ctx->flags = C3DiF_Active | C3DiF_TexEnvBuf | C3DiF_TexEnvAll | C3DiF_Effect | C3DiF_TexStatus | C3DiF_TexAll;
++	C3Di_InvalidateStateShadows();
++	C3Di_InvalidateUniformShadows();
+ 
+ 	// TODO: replace with direct struct access
+ 	C3D_DepthMap(true, -1.0f, 0.0f);
+@@ -157,6 +176,7 @@ void C3D_SetScissor(GPU_SCISSORMODE mode, u32 left, u32 top, u32 right, u32 bott
+ 
+ void C3Di_UpdateContext(void)
+ {
++	C3Di_EnsureCommandSpace();
+ 	int i;
+ 	C3D_Context* ctx = C3Di_GetContext();
+ 
+@@ -206,7 +226,12 @@ void C3Di_UpdateContext(void)
+ 	if (ctx->flags & C3DiF_Effect)
+ 	{
+ 		ctx->flags &= ~C3DiF_Effect;
+-		C3Di_EffectBind(&ctx->effect);
++		if (!C3Di_EffectShadowValid || memcmp(&C3Di_EffectShadow, &ctx->effect, sizeof(C3D_Effect)) != 0)
++		{
++			C3Di_EffectBind(&ctx->effect);
++			C3Di_EffectShadow = ctx->effect;
++			C3Di_EffectShadowValid = true;
++		}
+ 	}
+ 
+ 	if (ctx->flags & C3DiF_TexAll)
+@@ -271,7 +296,11 @@ void C3Di_UpdateContext(void)
+ 		for (i = 0; i < 6; i ++)
+ 		{
+ 			if (!(ctx->flags & C3DiF_TexEnv(i))) continue;
++			if ((C3Di_TexEnvShadowValid & BIT(i)) && memcmp(&C3Di_TexEnvShadow[i], &ctx->texEnv[i], sizeof(C3D_TexEnv)) == 0)
++				continue;
+ 			C3Di_TexEnvBind(i, &ctx->texEnv[i]);
++			C3Di_TexEnvShadow[i] = ctx->texEnv[i];
++			C3Di_TexEnvShadowValid |= BIT(i);
+ 		}
+ 		ctx->flags &= ~C3DiF_TexEnvAll;
+ 	}
+diff --git a/source/drawArrays.c b/source/drawArrays.c
+index 8305ca1..787fbea 100644
+--- a/source/drawArrays.c
++++ b/source/drawArrays.c
+@@ -4,6 +4,28 @@ void C3D_DrawArrays(GPU_Primitive_t primitive, int first, int size)
+ {
+ 	C3Di_UpdateContext();
+ 
++	// mkw-3ds: one block of the same commands (see C3D_DrawElements).
++	if (gpuCmdBuf && gpuCmdBufOffset + 22 <= gpuCmdBufSize)
++	{
++		u32* p = gpuCmdBuf + gpuCmdBufOffset;
++#define C3DI_CMD(reg, mask, val) do { p[0] = (val); p[1] = GPUCMD_HEADER(0, (mask), (reg)); p += 2; } while (0)
++		C3DI_CMD(GPUREG_PRIMITIVE_CONFIG, 2, primitive);
++		C3DI_CMD(GPUREG_RESTART_PRIMITIVE, 0xF, 1);
++		C3DI_CMD(GPUREG_INDEXBUFFER_CONFIG, 0xF, 0x80000000);
++		C3DI_CMD(GPUREG_NUMVERTICES, 0xF, size);
++		C3DI_CMD(GPUREG_VERTEX_OFFSET, 0xF, first);
++		C3DI_CMD(GPUREG_GEOSTAGE_CONFIG2, 1, 1);
++		C3DI_CMD(GPUREG_START_DRAW_FUNC0, 1, 0);
++		C3DI_CMD(GPUREG_DRAWARRAYS, 0xF, 1);
++		C3DI_CMD(GPUREG_START_DRAW_FUNC0, 1, 1);
++		C3DI_CMD(GPUREG_GEOSTAGE_CONFIG2, 1, 0);
++		C3DI_CMD(GPUREG_VTX_FUNC, 0xF, 1);
++#undef C3DI_CMD
++		gpuCmdBufOffset += 22;
++		C3Di_GetContext()->flags |= C3DiF_DrawUsed;
++		return;
++	}
++
+ 	// Set primitive type
+ 	GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, primitive);
+ 	// Start a new primitive (breaks off a triangle strip/fan)
+diff --git a/source/drawElements.c b/source/drawElements.c
+index 091b6f4..a01de62 100644
+--- a/source/drawElements.c
++++ b/source/drawElements.c
+@@ -9,6 +9,40 @@ void C3D_DrawElements(GPU_Primitive_t primitive, int count, int type, const void
+ 
+ 	C3Di_UpdateContext();
+ 
++	// mkw-3ds: the same single-parameter commands GPUCMD_Add would emit, written
++	// as one block when they fit (GPUCMD_Add itself traps on overflow).
++	const u32 words = primitive == GPU_TRIANGLES ? 30 : 22;
++	if (gpuCmdBuf && gpuCmdBufOffset + words <= gpuCmdBufSize)
++	{
++		u32* p = gpuCmdBuf + gpuCmdBufOffset;
++#define C3DI_CMD(reg, mask, val) do { p[0] = (val); p[1] = GPUCMD_HEADER(0, (mask), (reg)); p += 2; } while (0)
++		C3DI_CMD(GPUREG_PRIMITIVE_CONFIG, 2, primitive != GPU_TRIANGLES ? primitive : GPU_GEOMETRY_PRIM);
++		C3DI_CMD(GPUREG_RESTART_PRIMITIVE, 0xF, 1);
++		C3DI_CMD(GPUREG_INDEXBUFFER_CONFIG, 0xF, (pa - base) | (type << 31));
++		C3DI_CMD(GPUREG_NUMVERTICES, 0xF, count);
++		C3DI_CMD(GPUREG_VERTEX_OFFSET, 0xF, 0);
++		if (primitive == GPU_TRIANGLES)
++		{
++			C3DI_CMD(GPUREG_GEOSTAGE_CONFIG, 2, 0x100);
++			C3DI_CMD(GPUREG_GEOSTAGE_CONFIG2, 2, 0x100);
++		}
++		C3DI_CMD(GPUREG_START_DRAW_FUNC0, 1, 0);
++		C3DI_CMD(GPUREG_DRAWELEMENTS, 0xF, 1);
++		C3DI_CMD(GPUREG_START_DRAW_FUNC0, 1, 1);
++		if (primitive == GPU_TRIANGLES)
++		{
++			C3DI_CMD(GPUREG_GEOSTAGE_CONFIG, 2, 0);
++			C3DI_CMD(GPUREG_GEOSTAGE_CONFIG2, 2, 0);
++		}
++		C3DI_CMD(GPUREG_VTX_FUNC, 0xF, 1);
++		C3DI_CMD(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
++		C3DI_CMD(GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
++#undef C3DI_CMD
++		gpuCmdBufOffset += words;
++		C3Di_GetContext()->flags |= C3DiF_DrawUsed;
++		return;
++	}
++
+ 	// Set primitive type
+ 	GPUCMD_AddMaskedWrite(GPUREG_PRIMITIVE_CONFIG, 2, primitive != GPU_TRIANGLES ? primitive : GPU_GEOMETRY_PRIM);
+ 	// Start a new primitive (breaks off a triangle strip/fan)
+diff --git a/source/internal.h b/source/internal.h
+index 3ccab72..673203e 100644
+--- a/source/internal.h
++++ b/source/internal.h
+@@ -148,6 +148,9 @@ void C3Di_GasUpdate(C3D_Context* ctx);
+ void C3Di_LightMtlBlend(C3D_Light* light);
+ 
+ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type);
++void C3Di_InvalidateUniformShadows(void);
++void C3Di_InvalidateTexShadows(void);
++void C3Di_InvalidateStateShadows(void);
+ void C3Di_LoadShaderUniforms(shaderInstance_s* si);
+ void C3Di_ClearShaderUniforms(GPU_SHADER_TYPE type);
+ 
+@@ -156,5 +159,6 @@ bool C3Di_SplitFrame(u32** pBuf, u32* pSize);
+ void C3Di_RenderQueueInit(void);
+ void C3Di_RenderQueueExit(void);
+ void C3Di_RenderQueueWaitDone(void);
++void C3Di_EnsureCommandSpace(void);
+ void C3Di_RenderQueueEnableVBlank(void);
+ void C3Di_RenderQueueDisableVBlank(void);
+diff --git a/source/renderqueue.c b/source/renderqueue.c
+index 209d69d..28f55c3 100644
+--- a/source/renderqueue.c
++++ b/source/renderqueue.c
+@@ -9,6 +9,12 @@ static C3D_RenderTarget *linkedTarget[3];
+ static TickCounter gpuTime, cpuTime;
+ 
+ static bool inFrame, inSafeTransfer, measureGpuTime;
++// libctru marks a queue idle before invoking its callback. The renderer may
++// run on a different core: fence the callback's final swap/state writes too.
++// Only the submitting thread accesses queueCallbackPending; the callback
++// publishes its completion through this one-shot event.
++static LightEvent queueCallbackDone;
++static bool queueCallbackPending;
+ static bool needSwapTop, needSwapBot, isTopStereo;
+ static float framerate = 60.0f;
+ static float framerateCounter[2] = { 60.0f, 60.0f };
+@@ -70,6 +76,7 @@ static void onQueueFinish(gxCmdQueue_s* queue)
+ 			needSwapBot = false;
+ 		}
+ 	}
++	LightEvent_Signal(&queueCallbackDone);
+ }
+ 
+ void C3D_FrameSync(void)
+@@ -89,11 +96,31 @@ u32 C3D_FrameCounter(int id)
+ 	return frameCounter[id];
+ }
+ 
++static void C3Di_RunQueue(gxCmdQueue_s* queue)
++{
++	// Running an empty libctru queue leaves it active: a later Add can then
++	// auto-start without passing this fence. Keep empty queues inactive.
++	if (queue->lastEntry >= queue->numEntries) return;
++	// Arm before Run, which may finish on the other core immediately.
++	queueCallbackPending = true;
++	gxCmdQueueRun(queue);
++}
++
+ static bool C3Di_WaitAndClearQueue(s64 timeout)
+ {
+ 	gxCmdQueue_s* queue = &C3Di_GetContext()->gxQueue;
+ 	if (!gxCmdQueueWait(queue, timeout))
+ 		return false;
++	if (queueCallbackPending)
++	{
++		if (timeout == 0)
++		{
++			if (!LightEvent_TryWait(&queueCallbackDone)) return false;
++		}
++		else if (timeout < 0) LightEvent_Wait(&queueCallbackDone);
++		else if (LightEvent_WaitTimeout(&queueCallbackDone, timeout)) return false;
++		queueCallbackPending = false;
++	}
+ 	gxCmdQueueStop(queue);
+ 	gxCmdQueueClear(queue);
+ 	return true;
+@@ -115,11 +142,13 @@ void C3Di_RenderQueueInit(void)
+ {
+ 	C3D_Context* ctx = C3Di_GetContext();
+ 
++	LightEvent_Init(&queueCallbackDone, RESET_ONESHOT);
++	queueCallbackPending = false;
+ 	C3Di_RenderQueueEnableVBlank();
+ 
+ 	GX_BindQueue(&ctx->gxQueue);
+ 	gxCmdQueueSetCallback(&ctx->gxQueue, onQueueFinish, NULL);
+-	gxCmdQueueRun(&ctx->gxQueue);
++	C3Di_RunQueue(&ctx->gxQueue);
+ }
+ 
+ void C3Di_RenderQueueExit(void)
+@@ -194,6 +223,25 @@ void C3D_FrameSplit(u8 flags)
+ 		GX_ProcessCommandList(cmdBuf, cmdBufSize*4, flags);
+ }
+ 
++// Local continuation patch. Reserve 64 KiB for a complete context upload,
++// one draw and list termination. The application uses a 1 MiB command buffer.
++// This runs between draws, before UpdateContext emits any pending state.
++void C3Di_EnsureCommandSpace(void)
++{
++	C3D_Context* ctx = C3Di_GetContext();
++	if (!inFrame || !gpuCmdBufOffset || gpuCmdBufOffset + 0x4000 <= gpuCmdBufSize)
++		return;
++	// Draw buffers can also have been updated by the CPU during this frame.
++	extern u32 __ctru_linear_heap;
++	extern u32 __ctru_linear_heap_size;
++	GSPGPU_FlushDataCache((void*)__ctru_linear_heap, __ctru_linear_heap_size);
++	C3D_FrameSplit(GX_CMDLIST_FLUSH);
++	C3Di_RunQueue(&ctx->gxQueue);
++	C3Di_WaitAndClearQueue(-1);
++	// PICA state survives a command-list boundary. Dirty state stays pending.
++	GPUCMD_SetBuffer(ctx->cmdBuf, ctx->cmdBufSize, 0);
++}
++
+ void C3D_FrameEnd(u8 flags)
+ {
+ 	C3D_Context* ctx = C3Di_GetContext();
+@@ -237,7 +285,7 @@ void C3D_FrameEnd(u8 flags)
+ 
+ 	measureGpuTime = true;
+ 	osTickCounterStart(&gpuTime);
+-	gxCmdQueueRun(&ctx->gxQueue);
++	C3Di_RunQueue(&ctx->gxQueue);
+ }
+ 
+ void C3D_FrameEndHook(void (* hook)(void*), void* param)
+@@ -395,7 +443,7 @@ static void C3Di_SafeDisplayTransfer(u32* inadr, u32 indim, u32* outadr, u32 out
+ 	C3Di_WaitAndClearQueue(-1);
+ 	inSafeTransfer = true;
+ 	GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
+-	gxCmdQueueRun(&C3Di_GetContext()->gxQueue);
++	C3Di_RunQueue(&C3Di_GetContext()->gxQueue);
+ }
+ 
+ static void C3Di_SafeTextureCopy(u32* inadr, u32 indim, u32* outadr, u32 outdim, u32 size, u32 flags)
+@@ -403,7 +451,7 @@ static void C3Di_SafeTextureCopy(u32* inadr, u32 indim, u32* outadr, u32 outdim,
+ 	C3Di_WaitAndClearQueue(-1);
+ 	inSafeTransfer = true;
+ 	GX_TextureCopy(inadr, indim, outadr, outdim, size, flags);
+-	gxCmdQueueRun(&C3Di_GetContext()->gxQueue);
++	C3Di_RunQueue(&C3Di_GetContext()->gxQueue);
+ }
+ 
+ static void C3Di_SafeMemoryFill(u32* buf0a, u32 buf0v, u32* buf0e, u16 control0, u32* buf1a, u32 buf1v, u32* buf1e, u16 control1)
+@@ -411,7 +459,7 @@ static void C3Di_SafeMemoryFill(u32* buf0a, u32 buf0v, u32* buf0e, u16 control0,
+ 	C3Di_WaitAndClearQueue(-1);
+ 	inSafeTransfer = true;
+ 	GX_MemoryFill(buf0a, buf0v, buf0e, control0, buf1a, buf1v, buf1e, control1);
+-	gxCmdQueueRun(&C3Di_GetContext()->gxQueue);
++	C3Di_RunQueue(&C3Di_GetContext()->gxQueue);
+ }
+ 
+ void C3D_SyncDisplayTransfer(u32* inadr, u32 indim, u32* outadr, u32 outdim, u32 flags)
+@@ -423,7 +471,7 @@ void C3D_SyncDisplayTransfer(u32* inadr, u32 indim, u32* outadr, u32 outdim, u32
+ 	} else
+ 	{
+ 		C3Di_SafeDisplayTransfer(inadr, indim, outadr, outdim, flags);
+-		gspWaitForPPF();
++		C3Di_WaitAndClearQueue(-1);
+ 	}
+ }
+ 
+@@ -436,7 +484,7 @@ void C3D_SyncTextureCopy(u32* inadr, u32 indim, u32* outadr, u32 outdim, u32 siz
+ 	} else
+ 	{
+ 		C3Di_SafeTextureCopy(inadr, indim, outadr, outdim, size, flags);
+-		gspWaitForPPF();
++		C3Di_WaitAndClearQueue(-1);
+ 	}
+ }
+ 
+@@ -449,6 +497,6 @@ void C3D_SyncMemoryFill(u32* buf0a, u32 buf0v, u32* buf0e, u16 control0, u32* bu
+ 	} else
+ 	{
+ 		C3Di_SafeMemoryFill(buf0a, buf0v, buf0e, control0, buf1a, buf1v, buf1e, control1);
+-		gspWaitForPSC0();
++		C3Di_WaitAndClearQueue(-1);
+ 	}
+ }
+diff --git a/source/tex3ds.c b/source/tex3ds.c
+index bcea3f0..b42a10b 100644
+--- a/source/tex3ds.c
++++ b/source/tex3ds.c
+@@ -136,6 +136,8 @@ Tex3DSi_ImportCommon(C3D_Tex* tex, C3D_TexCube* texcube, bool vram, decompressCa
+ 		if (!texdata)
+ 		{
+ 			C3D_TexDelete(tex);
++			memset(tex, 0, sizeof(*tex)); // Failed import no longer owns storage.
++			if (texcube) memset(texcube, 0, sizeof(*texcube));
+ 			free(texture);
+ 			return NULL;
+ 		}
+@@ -145,6 +147,8 @@ Tex3DSi_ImportCommon(C3D_Tex* tex, C3D_TexCube* texcube, bool vram, decompressCa
+ 		{
+ 			linearFree(texdata);
+ 			C3D_TexDelete(tex);
++			memset(tex, 0, sizeof(*tex)); // Failed import no longer owns storage.
++			if (texcube) memset(texcube, 0, sizeof(*texcube));
+ 			free(texture);
+ 			return NULL;
+ 		}
+@@ -177,6 +181,8 @@ Tex3DSi_ImportCommon(C3D_Tex* tex, C3D_TexCube* texcube, bool vram, decompressCa
+ 		if (!decompressV(iov, 6, callback, userdata, insize))
+ 		{
+ 			C3D_TexDelete(tex);
++			memset(tex, 0, sizeof(*tex)); // Failed import no longer owns storage.
++			if (texcube) memset(texcube, 0, sizeof(*texcube));
+ 			free(texture);
+ 			return NULL;
+ 		}
+@@ -189,6 +195,8 @@ Tex3DSi_ImportCommon(C3D_Tex* tex, C3D_TexCube* texcube, bool vram, decompressCa
+ 		if (!decompress(data, size, callback, userdata, insize))
+ 		{
+ 			C3D_TexDelete(tex);
++			memset(tex, 0, sizeof(*tex)); // Failed import no longer owns storage.
++			if (texcube) memset(texcube, 0, sizeof(*texcube));
+ 			free(texture);
+ 			return NULL;
+ 		}
+diff --git a/source/texture.c b/source/texture.c
+index d1340ae..f02d1dd 100644
+--- a/source/texture.c
++++ b/source/texture.c
+@@ -1,4 +1,5 @@
+ #include "internal.h"
++#include <string.h>
+ #include <c3d/renderqueue.h>
+ 
+ // Return bits per pixel
+@@ -226,7 +227,11 @@ void C3D_TexBind(int unitId, C3D_Tex* tex)
+ 	if (!(ctx->flags & C3DiF_Active))
+ 		return;
+ 
+-	if (unitId > 0 && C3D_TexGetType(tex) != GPU_TEX_2D)
++	// Local hardware patch: validate before indexing or inspecting the texture.
++	if (unitId < 0 || unitId >= 3)
++		return;
++
++	if (tex && unitId > 0 && C3D_TexGetType(tex) != GPU_TEX_2D)
+ 		return;
+ 
+ 	ctx->flags |= C3DiF_Tex(unitId);
+@@ -262,6 +267,17 @@ void C3D_TexShadowParams(bool perspective, float bias)
+ 	ctx->flags |= C3DiF_TexStatus;
+ }
+ 
++// Last 2D texture unit registers written (border, dim, param, lod, address,
++// type). Cube maps are always written. The texture cache clear that follows
++// every bind (C3Di_UpdateContext) is unaffected.
++static u32 C3Di_TexShadow[3][6];
++static bool C3Di_TexShadowValid[3];
++
++void C3Di_InvalidateTexShadows(void)
++{
++	C3Di_TexShadowValid[0] = C3Di_TexShadowValid[1] = C3Di_TexShadowValid[2] = false;
++}
++
+ void C3Di_SetTex(int unit, C3D_Tex* tex)
+ {
+ 	u32 reg[10];
+@@ -282,6 +298,20 @@ void C3Di_SetTex(int unit, C3D_Tex* tex)
+ 			reg[4+i] = (osConvertVirtToPhys(cube->data[i]) >> 3) & 0x3FFFFF;
+ 	}
+ 
++	if (unit >= 0 && unit < 3)
++	{
++		if (regcount == 5)
++		{
++			u32* shadow = C3Di_TexShadow[unit];
++			if (C3Di_TexShadowValid[unit] && memcmp(shadow, reg, 5*sizeof(u32)) == 0 && shadow[5] == (u32)tex->fmt)
++				return;
++			memcpy(shadow, reg, 5*sizeof(u32));
++			shadow[5] = tex->fmt;
++			C3Di_TexShadowValid[unit] = true;
++		} else
++			C3Di_TexShadowValid[unit] = false;
++	}
++
+ 	switch (unit)
+ 	{
+ 		case 0:
+diff --git a/source/uniforms.c b/source/uniforms.c
+index ac4b36e..ed5baa1 100644
+--- a/source/uniforms.c
++++ b/source/uniforms.c
+@@ -1,11 +1,12 @@
+ #include "internal.h"
++#include <string.h>
+ #include <c3d/uniforms.h>
+ 
+ C3D_FVec C3D_FVUnif[2][C3D_FVUNIF_COUNT];
+ C3D_IVec C3D_IVUnif[2][C3D_IVUNIF_COUNT];
+ u16      C3D_BoolUnifs[2];
+ 
+-bool C3D_FVUnifDirty[2][C3D_FVUNIF_COUNT];
++bool C3D_FVUnifDirty[2][C3D_FVUNIF_COUNT] __attribute__((aligned(4)));
+ bool C3D_IVUnifDirty[2][C3D_IVUNIF_COUNT];
+ bool C3D_BoolUnifsDirty[2];
+ 
+@@ -19,6 +20,16 @@ static struct
+ static bool C3Di_FVUnifEverDirty[2][C3D_FVUNIF_COUNT];
+ static bool C3Di_IVUnifEverDirty[2][C3D_IVUNIF_COUNT];
+ 
++// Last float uniform values uploaded to each register. A dirty uniform whose
++// value is unchanged is not uploaded again.
++static C3D_FVec C3Di_FVUnifShadow[2][C3D_FVUNIF_COUNT];
++static bool C3Di_FVUnifShadowValid[2][C3D_FVUNIF_COUNT];
++
++void C3Di_InvalidateUniformShadows(void)
++{
++	memset(C3Di_FVUnifShadowValid, 0, sizeof(C3Di_FVUnifShadowValid));
++}
++
+ void C3D_UpdateUniforms(GPU_SHADER_TYPE type)
+ {
+ 	int offset = type == GPU_GEOMETRY_SHADER ? (GPUREG_GSH_BOOLUNIFORM-GPUREG_VSH_BOOLUNIFORM) : 0;
+@@ -32,23 +43,45 @@ void C3D_UpdateUniforms(GPU_SHADER_TYPE type)
+ 			float24Uniform_s* u = &C3Di_ShaderFVecData[type].data[i++];
+ 			GPUCMD_AddIncrementalWrites(GPUREG_VSH_FLOATUNIFORM_CONFIG+offset, (u32*)u, 4);
+ 			C3D_FVUnifDirty[type][u->id] = false;
++			C3Di_FVUnifShadowValid[type][u->id] = false;
+ 		}
+ 		C3Di_ShaderFVecData[type].dirty = false;
+ 		i = 0;
+ 	}
+ 
+-	// Update FVec uniforms
++	// Update FVec uniforms. A dirty uniform whose value is already in its
++	// register (shadow) is not uploaded again.
++	const bool* dirty = C3D_FVUnifDirty[type];
+ 	while (i < C3D_FVUNIF_COUNT)
+ 	{
+-		if (!C3D_FVUnifDirty[type][i])
++		// Skip four clean entries at a time (the array is 4-byte aligned)
++		if (!(i & 3))
++		{
++			u32 word;
++			memcpy(&word, __builtin_assume_aligned(&dirty[i], 4), sizeof(word));
++			if (!word)
++			{
++				i += 4;
++				continue;
++			}
++		}
++		if (!dirty[i])
++		{
++			i ++;
++			continue;
++		}
++		if (C3Di_FVUnifShadowValid[type][i] && memcmp(&C3D_FVUnif[type][i], &C3Di_FVUnifShadow[type][i], sizeof(C3D_FVec)) == 0)
+ 		{
++			C3D_FVUnifDirty[type][i] = false;
++			C3Di_FVUnifEverDirty[type][i] = true;
+ 			i ++;
+ 			continue;
+ 		}
+ 
+-		// Find the number of consecutive dirty uniforms
++		// Find the number of consecutive dirty, changed uniforms
+ 		int j;
+-		for (j = i; j < C3D_FVUNIF_COUNT && C3D_FVUnifDirty[type][j]; j ++);
++		for (j = i + 1; j < C3D_FVUNIF_COUNT && dirty[j]
++			&& !(C3Di_FVUnifShadowValid[type][j] && memcmp(&C3D_FVUnif[type][j], &C3Di_FVUnifShadow[type][j], sizeof(C3D_FVec)) == 0); j ++);
+ 
+ 		// Upload the uniforms
+ 		GPUCMD_AddWrite(GPUREG_VSH_FLOATUNIFORM_CONFIG+offset, 0x80000000|i);
+@@ -60,6 +93,8 @@ void C3D_UpdateUniforms(GPU_SHADER_TYPE type)
+ 		{
+ 			C3D_FVUnifDirty[type][k] = false;
+ 			C3Di_FVUnifEverDirty[type][k] = true;
++			C3Di_FVUnifShadow[type][k] = C3D_FVUnif[type][k];
++			C3Di_FVUnifShadowValid[type][k] = true;
+ 		}
+ 
+ 		// Advance
+@@ -87,6 +122,7 @@ void C3D_UpdateUniforms(GPU_SHADER_TYPE type)
+ void C3Di_DirtyUniforms(GPU_SHADER_TYPE type)
+ {
+ 	int i;
++	memset(C3Di_FVUnifShadowValid[type], 0, sizeof(C3Di_FVUnifShadowValid[type]));
+ 	C3D_BoolUnifsDirty[type] = true;
+ 	if (C3Di_ShaderFVecData[type].count)
+ 		C3Di_ShaderFVecData[type].dirty = true;

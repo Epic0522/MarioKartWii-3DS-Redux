@@ -1,0 +1,824 @@
+#include <malloc.h>
+#include <mkw/course_mii_billboards.hpp>
+#include <mkw/joint_billboard.hpp>
+#include <mkw/course_mii_statue.hpp>
+#include <game/system/RaceConfig.hh>
+#include <mkw/blast_renderer.hpp>
+#include "mkw/course_objects.hpp"
+#include <mkw/animation_budget.hpp>
+#include "mkw/course_object_kinds.hpp"
+#include "mkw/render_quality.hpp"
+#include "mkw/escalator_landing.hpp"
+#include "mkw/retail_lighting.hpp"
+#include <mkw/render_metrics.hpp>
+#include <mkw/job_worker.hpp>
+#include <mkw/player_shadow.hpp>
+#include <game/field/ObjectDirector.hh>
+#include <game/field/ObjectDrivableDirector.hh>
+#include <game/field/obj/ObjectEscalator.hh>
+#include <game/system/CourseMap.hh>
+#include <game/system/RaceManager.hh>
+#include <egg/math/Matrix.hh>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <unordered_map>
+
+namespace mkw {
+namespace K=Kinoko;
+C3D_Mtx objectMatrix(const K::EGG::Matrix34f& source,const K::EGG::Vector3f& scale){
+    C3D_Mtx m;Mtx_Identity(&m);
+    const float factors[]={scale.x,scale.y,scale.z,1.f};
+    for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col)
+        m.r[row].c[3-col]=source[row,col]*factors[col];
+    return m;
+}
+C3D_Mtx placementMatrix(const K::System::MapdataGeoObj& geo){
+    K::EGG::Matrix34f matrix;
+    matrix.makeRT(geo.rot()*(3.14159265358979323846f/180.f),geo.pos());
+    return objectMatrix(matrix,geo.scale());
+}
+C3D_Mtx basisMatrix(Vec3 x,Vec3 y,Vec3 z,Vec3 position,Vec3 scale){
+    C3D_Mtx m;Mtx_Identity(&m);
+    const Vec3 axes[]={x*scale.x,y*scale.y,z*scale.z};
+    for(unsigned col=0;col<3;++col){m.r[0].c[3-col]=axes[col].x;m.r[1].c[3-col]=axes[col].y;m.r[2].c[3-col]=axes[col].z;}
+    m.r[0].w=position.x;m.r[1].w=position.y;m.r[2].w=position.z;
+    return m;
+}
+namespace {
+constexpr size_t SkinReserve=2u*1024*1024;
+std::unique_ptr<Model> cloneModel(const Model& source){
+    auto copy=std::make_unique<Model>();
+    copy->vertices=static_cast<Vertex*>(linearAlloc(source.vertexCount*sizeof(Vertex)));
+    copy->indices=static_cast<uint16_t*>(linearAlloc(source.indexCount*sizeof(uint16_t)));
+    if(!copy->vertices||!copy->indices)return nullptr;
+    copy->vertexCount=source.vertexCount;copy->indexCount=source.indexCount;
+    std::memcpy(copy->vertices,source.vertices,source.vertexCount*sizeof(Vertex));
+    std::memcpy(copy->indices,source.indices,source.indexCount*sizeof(uint16_t));
+    copy->submeshes=source.submeshes;copy->textures=source.textures;
+    copy->samplers=source.samplers;
+    copy->staticLightingBaked=source.staticLightingBaked;copy->sourceVertexHash=source.sourceVertexHash;
+    copy->fixedLighting=source.fixedLighting;
+    if(source.staticEnvironment2){
+        const size_t bytes=size_t(source.vertexCount)*2*sizeof(float);
+        copy->staticEnvironment2=static_cast<float*>(linearAlloc(bytes));if(!copy->staticEnvironment2)return nullptr;
+        std::memcpy(copy->staticEnvironment2,source.staticEnvironment2,bytes);flushGpuData(copy->staticEnvironment2,bytes);
+    }
+    copy->minimum=source.minimum;copy->maximum=source.maximum;
+    flushGpuData(copy->indices,copy->indexCount*sizeof(uint16_t));
+    return copy;
+}
+bool endsWith(const std::string& s,const char* suffix){const size_t n=std::strlen(suffix);return s.size()>=n&&!s.compare(s.size()-n,n,suffix);}
+// Coconut Mall escalator treads at their Kinoko step phase.
+struct EscalatorWrite {Model* mesh;const Vertex* base;float phase;};
+void writeEscalator(void* payload){
+    const auto& w=*static_cast<const EscalatorWrite*>(payload);auto& mesh=*w.mesh;
+    // Only Y and Z ever change: every other field keeps its loaded (base) value.
+    for(unsigned i=0;i<mesh.vertexCount;++i){
+        const auto p=escalatorLanding(w.base[i].position.y,w.base[i].position.z,w.phase);
+        mesh.vertices[i].position.y=p.y;mesh.vertices[i].position.z=p.z;
+    }
+    flushGpuData(mesh.vertices,mesh.vertexCount*sizeof(Vertex));
+}
+// One CPU-skinned instance copy (its palette follows the record).
+struct SkinWrite {const ObjectBank* bank;Model* model;bool normals;int clip;float frame;};
+void writeSkin(void* payload){
+    const auto& w=*static_cast<const SkinWrite*>(payload);
+    w.bank->skin(reinterpret_cast<const float*>(&w+1),*w.model,w.normals,w.clip,w.frame);
+}
+}
+
+ObjectAssets::~ObjectAssets()=default;
+ObjModel* ObjectAssets::find(const char* resource,const char* name) const {
+    if(!resource||!name)return nullptr;
+    for(const auto& m:models)if(m->resource==resource&&m->name==name)return m.get();
+    return nullptr;
+}
+ObjModel* ObjectAssets::main(const char* resource) const {
+    if(auto* m=find(resource,resource))return m;
+    for(const auto& m:models)if(m->resource==resource&&!endsWith(m->name,"-low")&&!endsWith(m->name,"-shadow"))return m.get();
+    return nullptr;
+}
+ObjModel* ObjectAssets::low(const ObjModel* model) const {return model?find(model->resource.c_str(),(model->name+"-low").c_str()):nullptr;}
+ObjModel* ObjectAssets::shadow(const ObjModel* model) const {return model?find(model->resource.c_str(),(model->name+"-shadow").c_str()):nullptr;}
+Tracks ObjectAssets::tracks(const ObjModel* model,const char* name) const {
+    Tracks t;t.model=const_cast<ObjModel*>(model);
+    if(!model||!model->bank)return t;
+    const auto& b=*model->bank;
+    const char* names[]={name,model->name.c_str(),model->resource.c_str()};
+    for(const char* n:names){
+        if(!n)continue;
+        if(t.clip<0)t.clip=b.clip(n);
+        if(t.srt<0)t.srt=b.scroll(n);
+        if(t.pat<0)t.pat=b.pattern(n);
+        if(t.clr<0)t.clr=b.color(n);
+    }
+    return t;
+}
+bool ObjectAssets::load(int course){
+    char path[64];std::snprintf(path,sizeof path,"models/course_%02d_visuals.list",course);
+    FILE* list=std::fopen(path,"r");if(!list)return course>=32;
+    const auto* race=Kinoko::System::RaceConfig::Instance();
+    const bool miiHeads= race&&miiStatuePlayersEligible(race->raceScenario().players,race->raceScenario().playerCount);
+    char resource[64],name[64],mesh[96],bankName[96];bool ok=true;
+    while(std::fscanf(list,"%63s %63s %95s %95s",resource,name,mesh,bankName)==4){
+        if(std::strchr(mesh,'/')||std::strstr(mesh,"..")||std::strchr(bankName,'/')||std::strstr(bankName,"..")){ok=false;break;}
+        // No Mii racer means the original manager returns no statue identity.
+        // Keep the base statue; do not load an unused substitute head pool.
+        if(!miiHeads&&!std::strcmp(resource,"__MiiStatueHeads"))continue;
+        // Battle coin visuals belong exclusively to CoinBattleRuntime. The
+        // GOBJ entry registers a spawn, not a permanently placed idle model.
+        if(course>=32&&course<=41&&!std::strcmp(resource,"coin"))continue;
+        auto m=std::make_unique<ObjModel>();m->resource=resource;m->name=name;m->model=std::make_unique<Model>();
+        char file[128];std::snprintf(file,sizeof file,"models/%s.gmdl",mesh);
+        if(!m->model->load(file)){ok=false;break;}
+        if((course==18&&!std::strcmp(resource,"WLscreenGC")&&!std::strcmp(name,"WLscreenGC"))||
+           (course==6&&!std::strcmp(resource,"dkmonitor")&&!std::strcmp(name,"dkmonitor"))||
+           (course==35&&!std::strcmp(resource,"fks_screen_wii")&&!std::strcmp(name,"fks_screen_wii"))){
+            const int screenTexture=course==6?3:course==35?2:0;m->model->stadiumTexture=screenTexture;
+            // This display face is immutable. Do not walk all its indexed
+            // triangles on the simulation thread every frame to cull capture.
+            for(const auto& shape:m->model->submeshes)if(shape.texture==screenTexture)
+                for(unsigned k=shape.first;k<shape.first+shape.count;++k){
+                    const auto p=m->model->vertices[m->model->indices[k]].position;
+                    if(!m->hasStadiumFace){m->stadiumFace={p,p};m->hasStadiumFace=true;}
+                    else m->stadiumFace.include(p);
+                }
+        }
+        // Peach Beach crowds currently produce black silhouettes through the
+        // light-texture combiner. Retain albedo, vertex shading, GX diffuse and
+        // fog, but bypass lm_0/lm_1 for these spectators. Animation and the
+        // regular rigid-mesh path remain unchanged.
+        const bool beachSpectator=course==16&&(!std::strncmp(resource,"group_",6)||
+            !std::strncmp(resource,"monte_",6)||!std::strncmp(resource,"mare_",5));
+        if(beachSpectator)for(auto& shape:m->model->submeshes)
+            if(((shape.lighting&retail::ChannelMask)>>retail::ChannelShift)==2){
+                shape.lighting=(shape.lighting&0x7ffu&~retail::ChannelMask)|(1u<<retail::ChannelShift);
+                shape.add=0;
+            }
+        // HW108: these small flag textures use trilinear GX mip sampling.
+        // Keep the original base pixels/lighting, and avoid the PICA mip path
+        // only for Gold Mine's flags, including both FlagB model LODs.
+        if(course==7&&(!std::strcmp(resource,"FlagA1")||!std::strcmp(resource,"FlagB1")))
+            for(auto& row:m->model->samplers)if(row[0].valid)row[0].minFilter&=1;
+        // Fixed local lighting for non-player spectators; this also allows
+        // weighted crowds to use the existing position-only GPU palette path.
+        if(!std::strncmp(resource,"group_",6)||!std::strncmp(resource,"monte_",6)||!std::strncmp(resource,"mare_",5))
+            m->model->freezeLighting();
+        m->bounds={m->model->minimum,m->model->maximum};
+        if(std::strcmp(bankName,"-")){
+            m->bank=std::make_unique<ObjectBank>();std::snprintf(file,sizeof file,"models/%s.dobj",bankName);
+            if(!m->bank->load(file)){ok=false;break;}
+            if(m->resource=="pakkun_f"&&!m->bank->hasJointCallbacks()){
+                std::fprintf(stderr,"pakkun_f bank missing original joint callbacks\n");ok=false;break;
+            }
+            m->bank->markRegisterAlpha(*m->model);
+            Bounds animated;if(m->bank->animatedBounds(animated)){m->bounds.include(animated.minimum);m->bounds.include(animated.maximum);}
+            if(m->bank->skinned()){
+                // One bone per triangle: share the mesh and skin on the GPU.
+                // Weighted meshes are CPU-skinned into per-instance copies.
+                const bool animatedShadow=m->resource=="r_parasol"&&m->name=="r_parasol-shadow";
+                if(!animatedShadow&&m->bank->makeRigid(*m->model))m->rigid=true;
+                else if((m->cpuSkin=m->bank->weighted()||animatedShadow)){
+                    m->crowd=!std::strncmp(resource,"group_",6)||!std::strncmp(resource,"monte_",6);
+                    if(!m->model->staticLightingBaked)for(const auto& s:m->model->submeshes)
+                        m->litNormals|=(s.lighting&retail::PrimaryEnvironment)||((s.lighting&retail::Retail)&&((s.lighting&retail::ChannelMask)>>retail::ChannelShift)!=0);
+                    // Unlit objects never read skinned normals: skin on the GPU
+                    // (one shared mesh, any pose per instance), else positions only.
+                    if(!animatedShadow&&!m->litNormals&&m->bank->gpuSkin(*m->model)){m->gpuSkin=true;m->cpuSkin=false;m->model->enableSkinCulling(m->bank->matrixCount());}
+                    else if(!m->litNormals)m->bank->shareSkinnedPositions();
+                    else m->bank->shareSkinnedVertices();
+                    if(m->cpuSkin){
+                        // One mandatory pose buffer must exist before preview labels
+                        // and race sound consume the remaining LINEAR space. Additional
+                        // per-instance copies may respect the overlay reserve; the first
+                        // visible instance must never disappear because of that reserve.
+                        auto first=cloneModel(*m->model);
+                        if(!first){ok=false;break;}
+                        m->skins.push_back(std::move(first));m->skinKeys.push_back({-1,0.f});
+                    }
+                }
+            }
+            if(m->bank->shapeCount()==m->model->submeshes.size())m->overrides.resize(m->model->submeshes.size());
+            for(const auto& source:CourseMiiBillboards){
+                if(m->resource!=source.resource||m->name!=source.model)continue;
+                const int index=m->bank->node(source.node);if(index<0)continue;
+                const auto slot=m->bank->nodes()[index].slot;
+                if(slot>=0&&unsigned(slot)<m->bank->matrixCount())m->miiBillboards.push_back({unsigned(slot),source.mode});
+            }
+
+        }
+        if(m->resource=="WLfirebarGC"&&m->name=="fireBPlane"){
+            m->firePhases=std::make_unique<FirePhaseStream>();
+            auto texture=std::make_shared<Texture>();
+            // Leave ordinary heap headroom for racers, menus and live effects.
+            const size_t heapBytes=envGetHeapSize(),usedBytes=mallinfo().uordblks;
+            const size_t budget=heapBytes>usedBytes+(8u<<20)?heapBytes-usedBytes-(8u<<20):0;
+            if(!m->firePhases->open("textures/firebar-indirect.ftan",budget)||
+               !C3D_TexInit(&texture->gpu,256,256,GPU_LA8)){ok=false;break;}
+            texture->ready=true;
+            if(!m->firePhases->read(0,texture->gpu.data,texture->gpu.size)){ok=false;break;}
+            C3D_TexSetFilter(&texture->gpu,GPU_LINEAR,GPU_LINEAR);
+            C3D_TexSetWrap(&texture->gpu,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+            C3D_TexFlush(&texture->gpu);
+            m->fireTexture=int(m->model->textures.size());m->firePhase=0;
+            fireCacheBytes.store(m->firePhases->bytes());fireCacheStride.store(m->firePhases->stride());
+            m->model->textures.push_back(std::move(texture));
+        }
+        models.push_back(std::move(m));
+    }
+    std::fclose(list);
+    if(!ok){models.clear();return false;}
+    if(find("koopaBall","koopaBall")||find("HeyhoBallGBA","HeyhoBallGBA")||find("K_bomb_car","K_bomb_car")){
+        explosion=std::make_unique<Model>();explosionBank=std::make_unique<DriverAnimation>();
+        if(!explosion->load("models/bomb_blast.gmdl")||!explosionBank->load("models/bomb_core.dskm",*explosion)){
+            explosion.reset();explosionBank.reset();models.clear();return false;
+        }
+    }
+    return true;
+}
+void ObjectAssets::beginFrame(){explosionUsed=0;for(auto& m:models)m->skinUsed=0;}
+
+struct CourseObjects::Impl {
+    size_t allocationReserve=SkinReserve;
+    std::unique_ptr<Model> palm;
+    std::array<std::unique_ptr<Model>,6> escalators;
+    std::vector<Vertex> escalatorBase;
+    std::array<bool,6> escalatorWritten{};
+    std::vector<C3D_Mtx> palms;
+    struct LavaSplash { bool active=false;unsigned start=0;Vec3 position{};float scale=1; };
+    std::array<LavaSplash,12> lavaSplashes{};
+    int course=-1;
+    ObjectAssets assets;
+    std::vector<Visual> visuals,suspendedVisuals;
+    bool graphicsSuspended=false;
+    bool linked=false;
+    const void* director=nullptr;
+    uint32_t lastTimer=0;
+    std::vector<float> scratch;
+    std::vector<Renderer::ShadowVolume> shadows,skyShadows;
+    std::vector<Renderer::ShadowReceiver> shadowReceivers;
+    void link();
+    // Re-links after a restarted race builds a new Kinoko scene.
+    bool ready();
+    // One frame's recorded sky pass and object pass (record), replayed in order.
+    ObjectDrawList sky,objects,water;
+    ViewFrustum view{};
+    std::vector<Bounds> stadiumScreens;bool stadiumBoundsReady=false;
+    unsigned tick=0;
+    Vec3 camera{};
+    bool linkedReady=false,recorded=false,queued=false;
+    // The sky pass and the object pass are separate jobs, run in that order:
+    // drawSky waits only for the sky, and the objects record during the track.
+    Job skyJob,objectJob;
+    void recordSky();
+    void recordObjects();
+    void begin(const Renderer& renderer,unsigned frameTick,Vec3 frameCamera);
+    void replay(Renderer& renderer,const ObjectDrawList& list,unsigned phase=0);
+};
+CourseObjects::CourseObjects():impl_(std::make_unique<Impl>()){}
+CourseObjects::~CourseObjects()=default;
+unsigned CourseObjects::palmCount() const {return impl_->palms.size();}
+unsigned CourseObjects::moveTexturesToVram(Renderer& renderer,std::size_t reserve){
+    unsigned moved=0;
+    auto move=[&](const Model* model,int dynamic=-1){if(model)for(unsigned i=0;i<model->textures.size();++i)
+        if(int(i)!=dynamic&&model->textures[i])moved+=renderer.moveToVram(*model->textures[i],reserve);};
+    // Phase textures remain CPU-writable LINEAR; uploads are deferred until
+    // the previous GPU frame has finished, unlike immutable course textures.
+    for(const auto& m:impl_->assets.models)move(m->model.get(),m->fireTexture);
+    move(impl_->palm.get());
+    return moved;
+}
+unsigned CourseObjects::modelCount() const {return impl_->assets.models.size();}
+void CourseObjects::reset(){
+    auto& d=*impl_;
+    if(d.queued){jobWorker().finish(d.skyJob);jobWorker().finish(d.objectJob);}
+    const auto reserve=d.allocationReserve;
+    // Recorded palettes and skin scratch are race-owned too. Rebuild the
+    // empty owner rather than retaining the previous course's capacities.
+    impl_=std::make_unique<Impl>();impl_->allocationReserve=reserve;
+}
+void CourseObjects::suspendGraphics(){
+    auto& d=*impl_;if(d.graphicsSuspended)return;
+    jobWorker().finishAll();
+    if(!d.linked)d.link();
+    d.suspendedVisuals=std::move(d.visuals);
+    d.sky.clear();d.objects.clear();d.water.clear();d.shadows.clear();d.skyShadows.clear();
+    d.assets.explosionPoses.clear();d.assets.explosionUsed=0;d.assets.explosion.reset();d.assets.explosionBank.reset();d.assets.models.clear();
+    d.palm.reset();for(auto& mesh:d.escalators)mesh.reset();d.escalatorBase.clear();
+    d.linked=false;d.linkedReady=false;d.recorded=false;d.queued=false;d.graphicsSuspended=true;
+}
+bool CourseObjects::resumeGraphics(){
+    auto& d=*impl_;if(!d.graphicsSuspended)return true;
+    d.assets.models.clear();d.palm.reset();for(auto& mesh:d.escalators)mesh.reset();
+    if(d.course==5&&!loadCoconut())return false;
+    if(!d.assets.load(d.course))return false;
+    d.link();
+    // Rebind only graphics pointers; preserve route followers, deforming-object
+    // state, sampled animation ages and observed native states from the freeze.
+    for(auto& v:d.visuals)for(auto& saved:d.suspendedVisuals)if(saved.index==v.index){
+        const auto main=v.main,low=v.low,shadow=v.shadow;const auto extra=v.extra;
+        const auto clips=v.clips;const auto present=v.present;
+        v=std::move(saved);v.main=main;v.low=low;v.shadow=shadow;v.extra=extra;
+        v.clips=clips;v.present=present;break;
+    }
+    d.suspendedVisuals.clear();d.graphicsSuspended=false;d.recorded=false;return true;
+}
+void CourseObjects::invalidate(){impl_->linked=false;impl_->visuals.clear();impl_->lavaSplashes={};}
+void CourseObjects::triggerLavaSplash(unsigned racer,Vec3 position,float scale,unsigned tick){
+    auto& d=*impl_;
+    if(racer>=d.lavaSplashes.size())return;
+    // Draw recording reads these states; never mutate a queued frame.
+    if(d.queued){jobWorker().finish(d.skyJob);jobWorker().finish(d.objectJob);}
+    d.lavaSplashes[racer]={true,tick,position,scale};
+}
+void CourseObjects::setAllocationReserve(std::size_t bytes){impl_->allocationReserve=std::max(SkinReserve,bytes);}
+bool CourseObjects::loadCoconut(){
+    auto& d=*impl_;
+    d.palm=std::make_unique<Model>();
+    if(!d.palm->load("models/coconut_palm_000.gmdl")){d.palm.reset();return false;}
+    d.palm->enableStaticCulling();
+    // Each escalator has independent GPU vertices until the frame completes.
+    // Model's weak texture cache shares the original texture across all six.
+    for(auto& mesh:d.escalators){
+        mesh=std::make_unique<Model>();
+        if(!mesh->load("models/coconut_escalator_000.gmdl")){for(auto& m:d.escalators)m.reset();d.palm.reset();return false;}
+    }
+    d.escalatorBase.assign(d.escalators[0]->vertices,d.escalators[0]->vertices+d.escalators[0]->vertexCount);
+    d.escalatorWritten={};
+    const auto* map=K::System::CourseMap::Instance();
+    d.palms.clear();
+    for(unsigned i=0;i<map->getGeoObjCount();++i){
+        const auto* obj=map->getGeoObj(i);
+        if(obj->id()!=unsigned(K::Field::ObjectId::PalmTree)||!(obj->presenceFlag()&1))continue;
+        d.palms.push_back(placementMatrix(*obj));
+    }
+    return true;
+}
+bool CourseObjects::loadCourse(int courseId){
+    fireCacheBytes.store(0);fireCacheStride.store(0);
+    auto& d=*impl_;
+    d.visuals.clear();d.assets.models.clear();d.linked=false;d.course=courseId;
+    return d.assets.load(courseId);
+}
+void CourseObjects::Impl::link(){
+    stadiumBoundsReady=false;stadiumScreens.clear();
+    visuals.clear();linked=true;
+    const auto* map=K::System::CourseMap::Instance();
+    const auto* objects=K::Field::ObjectDirector::Instance();
+    director=objects;
+    if(!map||!objects||assets.models.empty())return;
+    // Kinoko constructs and loads an object's parts (fireballs, wiggler
+    // segments, cow followers) before the object itself, so the last object
+    // registered for a placement is the one created from it.
+    std::unordered_map<const K::System::MapdataGeoObj*,std::vector<const K::Field::ObjectBase*>> owner;
+    for(const auto* obj:objects->objects())if(obj->mapObj())owner[obj->mapObj()].push_back(obj);
+    if(const auto* drivable=K::Field::ObjectDrivableDirector::Instance())
+        for(const auto* obj:drivable->objects())if(obj->mapObj())owner[obj->mapObj()].push_back(obj);
+    // Blocks live only in their manager, not the ordinary object lists.
+    // Override the manager's first-placement alias with the actual block.
+    if(const auto* drivable=K::Field::ObjectDrivableDirector::Instance())
+        if(const auto* manager=drivable->obakeManager())
+            for(const auto* block:manager->blocks())if(block->mapObj())owner[block->mapObj()]={block};
+    const auto& flow=objects->flowTable();
+    for(unsigned i=0;i<map->getGeoObjCount();++i){
+        const auto* geo=map->getGeoObj(i);
+        if(!geo||!(geo->presenceFlag()&1))continue;
+        const auto* set=flow.set(flow.slot(static_cast<K::Field::ObjectId>(geo->id())));
+        if(!set)continue;
+        Visual v;v.geo=geo;v.index=i;
+        if(auto it=owner.find(geo);it!=owner.end()){v.parts=it->second;v.object=v.parts.back();}
+        std::memcpy(v.name,set->name,sizeof v.name);v.name[sizeof v.name-1]=0;
+        std::memcpy(v.resources,set->resources,sizeof v.resources);v.resources[sizeof v.resources-1]=0;
+        std::strncpy(v.resource,v.resources,sizeof v.resource-1);
+        if(char* semicolon=std::strchr(v.resource,';'))*semicolon=0;
+        v.placement=placementMatrix(*geo);
+        if(classifyObject(v,assets,course))visuals.push_back(v);
+    }
+
+}
+void CourseObjects::Impl::begin(const Renderer& renderer,unsigned frameTick,Vec3 frameCamera){
+    // Linking reads and rebuilds visuals: always on this thread, before recording.
+    view=renderer.viewFrustum();tick=frameTick;camera=frameCamera;linkedReady=ready();recorded=true;
+}
+// The sky pass precedes the object pass, which restarts the per-model
+// CPU-skin copies, exactly as drawSky then draw ran them.
+void CourseObjects::Impl::recordSky(){
+    sky.clear();skyShadows.clear();
+    if(!linkedReady)return;
+    ObjectDraw context{view,assets,tick,camera,course,scratch,skyShadows,sky,true,allocationReserve};
+    for(auto& v:visuals)if(skyObject(v))drawObject(context,v);
+}
+void CourseObjects::Impl::recordObjects(){
+    objects.clear();water.clear();
+    if(palm)for(const auto& matrix:palms)if(!renderQuality().tooSmall({palm->minimum,palm->maximum},matrix,camera))objects.records.push_back({ObjectDrawRecord::Plain,false,0,palm.get(),nullptr,0,0,0,0,0,matrix});
+    // Includes the children of paired escalators. Kinoko updates these transforms
+    // after its 60 Hz step, including stops/reversals and the looping tread offset.
+    // Query each frame so restart/map changes cannot leave stale scene pointers.
+    if(escalators[0]){
+        unsigned index=0;
+        for(const auto* obj:K::Field::ObjectDrivableDirector::Instance()->objects()){
+            if(obj->id()!=K::Field::ObjectId::Escalator)continue;
+            if(index>=escalators.size())break;
+            const unsigned slot=index;auto& mesh=*escalators[index++];
+            const EscalatorWrite write{&mesh,escalatorBase.data(),static_cast<const K::Field::ObjectEscalator*>(obj)->stepFactor()};
+            // Reduced quality: each tread mesh re-poses on alternate frames
+            // (half of them each frame); its transform still moves every frame.
+            const bool skip=renderQuality().animationStep&&escalatorWritten[slot]&&((tick/2+slot)&1);
+            escalatorWritten[slot]=true;
+            if(skip){}
+            else if(auto* deferred=deferredWrites()){
+                auto* w=static_cast<EscalatorWrite*>(deferred->allocate(sizeof write));*w=write;deferred->queue(writeEscalator,w);
+            }else writeEscalator(const_cast<EscalatorWrite*>(&write));
+            objects.records.push_back({ObjectDrawRecord::Plain,false,0,&mesh,nullptr,0,0,0,0,0,objectMatrix(obj->transform(),obj->scale())});
+        }
+    }
+    shadows.clear();
+    if(!linkedReady)return;
+    assets.beginFrame();
+    ObjectDraw context{view,assets,tick,camera,course,scratch,shadows,objects,false,allocationReserve};
+    ObjectDraw waterContext{view,assets,tick,camera,course,scratch,shadows,water,false,allocationReserve};
+    for(auto& v:visuals)if(!skyObject(v))drawObject(waterObject(v)?waterContext:context,v);
+    // Retail owns one pochaYogan model per player and restarts all three
+    // non-looping tracks together. Keep the authored terminal pose rather
+    // than inventing a timer that could truncate CLR/SRT or the mesh motion.
+    const auto splash=assets.tracks(assets.find("pochaYogan","pochaYogan"));
+    if(splash.model)for(const auto& state:lavaSplashes){
+        if(!state.active||tick<state.start)continue;
+        const auto matrix=basisMatrix({1,0,0},{0,1,0},{0,0,1},state.position,{state.scale,state.scale,state.scale});
+        waterContext.submit(splash.model,matrix,animAt(splash,float(tick-state.start)));
+    }
+}
+void CourseObjects::Impl::replay(Renderer& renderer,const ObjectDrawList& list,unsigned phase){
+    for(const auto& r:list.records){
+        if(r.kind==ObjectDrawRecord::Explosion){
+            if(phase!=1)blast::drawBlast(renderer,*r.target,r.transform,unsigned(std::max(0.f,r.frame)),false);
+            continue;
+        }
+        // Normal world DrawOpa/DrawXlu passes: every model uses its authored
+        // material flags. No object-name, firebar or distance exceptions.
+        struct Context {const Model* model;unsigned phase;};
+        const Context context{r.target,r.backdrop?0:phase};
+        auto visible=[](void* data,std::size_t i){
+            const auto& c=*static_cast<const Context*>(data);
+            return c.phase==0||bool(c.model->submeshes[i].flags&2)==(c.phase==2);
+        };
+        if(r.backdrop&&phase==2)continue;
+        // A phase with no contributing material needs no draw command, pose
+        // bindings or repeated bone-uniform upload (common for treehouse props).
+        if(context.phase&&std::none_of(r.target->submeshes.begin(),r.target->submeshes.end(),
+            [&](const auto& sub){return sub.count&&bool(sub.flags&2)==(context.phase==2);}))continue;
+
+        if(r.kind==ObjectDrawRecord::Plain){renderer.draw(*r.target,r.transform,false,nullptr,context,visible);continue;}
+        RigidPose pose;
+        if(r.pose==1){pose.parts=r.parts;pose.palette=list.palettes.data()+r.palette;pose.stride=12;pose.matrices=r.bones;renderer.setRigidPose(&pose);}
+        else if(r.pose==2)renderer.setSkinPalette(list.palettes.data()+r.palette,r.bones,12);
+        if(r.overrideCount)renderer.setOverrides(list.overrides.data()+r.overrides,r.overrideCount);
+        renderer.draw(*r.target,r.transform,r.backdrop,nullptr,context,visible);
+        renderer.setOverrides(nullptr,0);
+        renderer.setRigidPose(nullptr);
+        renderer.setSkinPalette(nullptr,0,12);
+    }
+}
+void CourseObjects::prepare(const Renderer& renderer,unsigned tick,Vec3 camera){
+    auto& d=*impl_;
+    d.begin(renderer,tick,camera);
+    d.skyJob.reset([](void* c){static_cast<Impl*>(c)->recordSky();},&d);
+    d.objectJob.reset([](void* c){static_cast<Impl*>(c)->recordObjects();},&d);
+    auto& worker=jobWorker();
+    d.queued=worker.running();
+    if(d.queued){worker.submit(d.skyJob);worker.submit(d.objectJob);}
+    else{d.recordSky();d.recordObjects();}
+}
+void CourseObjects::requestStadiumScreen(Renderer& renderer){
+    auto& d=*impl_;
+    // WLscreenGC is a stationary KMP placement. Keep both its local face and
+    // placed world bounds for the scene; visibility only queries these AABBs.
+    // link() invalidates them on restart, race change and graphics resume.
+    if(d.ready()&&!d.stadiumBoundsReady){
+        d.stadiumScreens.clear();
+        for(const auto& v:d.visuals){
+            const auto* asset=v.main.model;
+            if(!asset||!asset->hasStadiumFace)continue;
+            const auto m=v.kinetic&&v.object?objectMatrix(v.object->transform(),v.object->scale()):v.placement;
+            float rows[12];for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[r*4+c]=m.r[r].c[3-c];
+            d.stadiumScreens.push_back(transformBounds(asset->stadiumFace,rows));
+        }
+        d.stadiumBoundsReady=true;
+    }
+    // Unknown/missing placement bounds remain conservative: capture normally.
+    renderer.requestStadiumScreen(d.stadiumScreens.data(),unsigned(d.stadiumScreens.size()));
+}
+void CourseObjects::draw(Renderer& renderer,unsigned tick,Vec3 camera){
+    auto& d=*impl_;
+    if(!d.recorded){d.begin(renderer,tick,camera);d.recordSky();d.recordObjects();}
+    else if(d.queued){
+        // The object pass may run here only once the sky pass has finished.
+        jobWorker().finish(d.skyJob);jobWorker().finish(d.objectJob);d.queued=false;
+    }
+    // Resolve the ground-shadow volumes before their casters. These authored
+    // volumes intersect the body (Chomp, Cataquack, crowds); resolving against
+    // the body's depth stamps a hard dark band onto the actor itself.
+    if(d.linkedReady)renderer.drawShadowVolumes(d.shadows.data(),unsigned(d.shadows.size()),.5f);
+    d.replay(renderer,d.objects,1);
+    d.recorded=false;
+}
+
+bool CourseObjects::suppressWheelContact(Vec3 center,float radius) const{
+    const auto* director=K::Field::ObjectDrivableDirector::Instance();
+    if(!director||radius<=0)return false;
+    const K::EGG::Vector3f p{center.x,center.y,center.z};
+    for(auto* object:director->objects()){
+        using K::Field::ObjectId;
+        // Original Turibashi/Ami are vertically deforming road surfaces.
+        // Keep VolcanoPiece, factory belts and all other supports unchanged.
+        if(object->id()!=ObjectId::Turibashi&&object->id()!=ObjectId::Ami)continue;
+        // Non-pushing query: no collision entries, status or physical motion
+        // are modified. Include the existing AO fade band so the policy does
+        // not flicker when wheel contact briefly clears during a small hop.
+        if(object->checkSpherePartial(radius+playerShadow::contactHeightTolerance()+2.f,
+            p,p,K::Field::KCLTypeMask(KCL_TYPE_FLOOR),nullptr,nullptr,0))return true;
+    }
+    return false;
+}
+
+const std::vector<Renderer::ShadowReceiver>& CourseObjects::shadowReceivers(Vec3 origin,float radius){
+    auto& d=*impl_;auto& out=d.shadowReceivers;out.clear();
+    // draw() joined the pose worker. Reuse exactly that frame's geometry,
+    // not KMP's initial placement or a guessed supporting quad.
+    float recordRows[12];
+    auto append=[&](const ObjectDrawRecord& record,const C3D_Mtx& transform,
+                    unsigned first,unsigned count,unsigned lighting,const Bounds& local,const float* palette=nullptr,unsigned bones=0){
+        // Static and GPU-skinned blocks share the record transform. Extract
+        // its rows once; rigid parts still use their current bone transform.
+        float partRows[12];const float* rows=recordRows;
+        if(&transform!=&record.transform){
+            for(unsigned i=0;i<3;++i)for(unsigned j=0;j<4;++j)partRows[i*4+j]=transform.r[i].c[3-j];
+            rows=partRows;
+        }
+        const Bounds bounds=transformBoundsPadded(local,rows);
+        if(!playerShadow::intersects(bounds.minimum,bounds.maximum,origin,radius))return;
+        if(!out.empty()){
+            auto& previous=out.back();
+            if(previous.model==record.target&&previous.first+previous.count==first&&
+               previous.lighting==lighting&&previous.palette==palette&&previous.bones==bones&&
+               std::memcmp(&previous.transform,&transform,sizeof transform)==0){
+                previous.count+=count;previous.bounds.include(bounds.minimum);previous.bounds.include(bounds.maximum);return;
+            }
+        }
+        out.push_back({record.target,transform,first,count,lighting,palette,bones,bounds});
+    };
+    for(const auto& record:d.objects.records){
+        if(record.backdrop||record.kind==ObjectDrawRecord::Explosion||!record.target)continue;
+        const auto& model=*record.target;
+        for(unsigned i=0;i<3;++i)for(unsigned j=0;j<4;++j)recordRows[i*4+j]=record.transform.r[i].c[3-j];
+        // Only immutable visibility geometry has a reliable model envelope.
+        // Posed/CPU-deformed objects keep their existing per-part path.
+        if(!record.pose&&!model.visibility.empty()){
+            const auto bounds=transformBoundsPadded({model.minimum,model.maximum},recordRows);
+            if(!playerShadow::intersects(bounds.minimum,bounds.maximum,origin,radius))continue;
+        }
+        for(unsigned j=0;j<model.submeshes.size();++j){
+            const auto& sub=model.submeshes[j];
+            // Transparent/cutout foliage is not a solid driving surface.
+            if(!sub.count||(sub.flags&1)||!playerShadow::receives(sub.flags))continue;
+            if(record.pose==1){
+                if(!record.parts||j>=record.parts->size())continue;
+                for(const auto& part:(*record.parts)[j]){
+                    const float* m=d.objects.palettes.data()+record.palette+part.matrix*12;
+                    C3D_Mtx bone;Mtx_Identity(&bone);
+                    for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col)bone.r[row].c[3-col]=m[row*4+col];
+                    C3D_Mtx world;Mtx_Multiply(&world,&record.transform,&bone);
+                    append(record,world,part.first,part.count,sub.lighting,part.bounds);
+                }
+            }else if(record.pose==2){
+                if(record.bones>Renderer::MaxSkinBones||j>=model.skinVisibility.size())continue;
+                const float* palette=d.objects.palettes.data()+record.palette;
+                for(const auto& block:model.skinVisibility[j])
+                    append(record,record.transform,block.indices.first,block.indices.count,sub.lighting,
+                           posedSkinBounds(block,palette,12),palette,record.bones);
+            }else if(j<model.visibility.size()){
+                for(const auto& block:model.visibility[j].blocks)
+                    append(record,record.transform,block.indices.first,block.indices.count,sub.lighting,block.bounds);
+            }else{
+                // Visibility blocks are optional, just as in drawNow(). Plain
+                // moving platforms still draw their complete submesh. Omitting
+                // them here leaves scene depth but no shadow receiver at all.
+                append(record,record.transform,sub.first,sub.count,sub.lighting,
+                       {model.minimum,model.maximum});
+            }
+        }
+    }
+    return out;
+}
+
+void CourseObjects::drawWater(Renderer& renderer){
+    // draw() has joined the object job. Keep the recorded materials and pose
+    // at that same tick; no second simulation or recording is needed.
+    impl_->replay(renderer,impl_->water);
+    impl_->replay(renderer,impl_->objects,2);
+}
+bool CourseObjects::Impl::ready(){
+    if(assets.models.empty())return false;
+    // A restarted race builds a new Kinoko scene: placements must re-link.
+    const auto* race=K::System::RaceManager::Instance();
+    const uint32_t timer=race?race->timer():0;
+    if(linked&&(K::Field::ObjectDirector::Instance()!=director||timer<lastTimer)){linked=false;visuals.clear();}
+    lastTimer=timer;
+    if(!linked)link();
+    return true;
+}
+void CourseObjects::drawSky(Renderer& renderer,unsigned tick,Vec3 camera){
+    auto& d=*impl_;
+    if(!d.recorded){d.begin(renderer,tick,camera);d.recordSky();d.recordObjects();}
+    else if(d.queued)jobWorker().finish(d.skyJob);
+    d.replay(renderer,d.sky);
+}
+void ObjectDraw::shadow(ObjModel* m,const C3D_Mtx& transform,const Anim& anim){
+    if(!renderQuality().shadowVolumes)return;
+    if(!m||!m->model||!view.model(transform).intersects(m->bounds))return;
+    if(anim.clip>=0&&m->bank&&m->cpuSkin){
+        // Reuse the deferred per-instance skin path, then move its posed
+        // mesh into the stencil pass instead of the colour draw list.
+        const auto before=list.records.size();
+        submit(m,transform,anim);
+        if(list.records.size()>before){
+            shadows_.push_back({list.records.back().target,transform});
+            list.records.pop_back();
+        }
+        return;
+    }
+    shadows_.push_back({m->model.get(),transform});
+}
+void ObjectDraw::explosion(const C3D_Mtx& transform,float frame){
+    if(!assets.explosion||!assets.explosionBank)return;
+    // Every simultaneous blast needs its own vertex destination: deferred
+    // pose writes execute before draws, so a shared destination kept only the
+    // last blast's age. Reuse these copies between frames like object skins.
+    if(assets.explosionUsed==assets.explosionPoses.size()){
+        auto copy=cloneModel(*assets.explosion);if(!copy)return;
+        assets.explosionPoses.push_back(std::move(copy));
+    }
+    ObjectDrawRecord r;r.kind=ObjectDrawRecord::Explosion;r.frame=frame;r.transform=transform;
+    auto& pose=*assets.explosionPoses[assets.explosionUsed++];
+    assets.explosionBank->apply(pose,0,frame,tick);
+    r.target=&pose;
+    list.records.push_back(r);
+}
+void ObjectDraw::plain(const Model& model,const C3D_Mtx& transform){
+    ObjectDrawRecord r;r.kind=ObjectDrawRecord::Plain;r.target=&model;r.transform=transform;
+    list.records.push_back(r);
+}
+// One cooked model at transform with the given pose/material tracks: posed,
+// skinned and its materials evaluated now, drawn when the list is replayed.
+namespace {
+struct FireTextureWrite {Texture* texture;unsigned bytes;};
+void writeFireTexture(void* data){
+    auto& w=*static_cast<FireTextureWrite*>(data);
+    std::memcpy(w.texture->gpu.data,&w+1,w.bytes);C3D_TexFlush(&w.texture->gpu);
+}
+}
+void ObjectDraw::submit(ObjModel* m,const C3D_Mtx& transform,const Anim& source){
+    if(!m||!m->model)return;
+    // Reduced quality: crowds step their clip (one frame per tick) every
+    // animationStep frames, so a skinned pose repeats instead of being skinned again.
+    Anim anim=source;const unsigned budget=animationStep();
+    // Never decimate procedural palettes (moving platforms, billboards,
+    // suspension/collision-linked deformation). Crowd clips are decorative.
+    if(budget>1&&m->crowd&&!anim.palette&&anim.clip>=0)anim.frame=std::floor(anim.frame/budget)*budget;
+    const float step=float(renderQuality().animationStep);
+    if(m->crowd&&step>0&&anim.clip>=0&&!anim.palette)anim.frame=std::floor(anim.frame/step)*step;
+    if(!view.model(transform).intersects(anim.bounds?*anim.bounds:m->bounds))return;
+    if(renderQuality().tooSmall(anim.bounds?*anim.bounds:m->bounds,transform,camera))return;
+    const ObjectBank* bank=m->bank.get();
+    // GPU-skinned meshes hold bone-local positions: unanimated, they draw the bind pose.
+    const bool posed=bank&&(anim.palette||anim.clip>=0||m->rigid||m->gpuSkin);
+    const float* palette=nullptr;
+    if(posed){
+        palette_.resize(size_t(bank->matrixCount())*12);
+        if(anim.palette)palette=anim.palette;
+        else{
+            if(m->budgetClip==anim.clip&&m->budgetFrame==anim.frame&&m->budgetPalette.size()==palette_.size()){
+                std::copy(m->budgetPalette.begin(),m->budgetPalette.end(),palette_.begin());++renderMetrics.scenePoseReuses;
+            }else{bank->pose(anim.clip,anim.frame,palette_.data());m->budgetPalette=palette_;m->budgetClip=anim.clip;m->budgetFrame=anim.frame;++renderMetrics.scenePoseSamples;}
+            palette=palette_.data();
+        }
+        if(!m->miiBillboards.empty()){
+            // Head planes retain their own animated origins and scales. Never
+            // turn the complete crowd/car model towards the viewer.
+            if(palette!=palette_.data())std::copy_n(palette,size_t(bank->matrixCount())*12,palette_.data());
+            palette=palette_.data();
+            C3D_Mtx mv;Mtx_Multiply(&mv,&view.view,&transform);
+            float rows[12];for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[r*4+c]=mv.r[r].c[3-c];
+            for(const auto& node:m->miiBillboards)billboardMiiJoint(palette_.data()+node.slot*12,rows,node.mode);
+            // Camera-dependent palettes cannot share a CPU skin by clip/frame.
+            anim.palette=palette;
+        }
+    }
+    ObjectDrawRecord r;r.backdrop=backdrop;r.transform=transform;
+    const Model* target=m->model.get();
+    auto keepPalette=[&](){r.palette=unsigned(list.palettes.size());list.palettes.insert(list.palettes.end(),palette,palette+size_t(bank->matrixCount())*12);};
+    if(posed&&m->rigid){r.pose=1;r.parts=&bank->rigidParts();r.bones=bank->matrixCount();keepPalette();}
+    else if(posed&&m->gpuSkin){r.pose=2;r.bones=bank->matrixCount();keepPalette();renderMetrics.skinnedVertices+=m->model->vertexCount;}
+    else if(posed&&m->cpuSkin&&(anim.clip>=0||anim.palette)){
+        int copy=-1;
+        // A clip pose is a function of (clip, frame); procedural palettes are unique.
+        if(!anim.palette)for(unsigned i=0;i<m->skinUsed;++i)if(m->skinKeys[i].clip==anim.clip&&m->skinKeys[i].frame==anim.frame){copy=int(i);break;}
+        // A copy left from an earlier frame may already hold this pose.
+        if(copy<0&&!anim.palette)for(unsigned i=m->skinUsed;i<m->skins.size();++i)
+            if(m->skinKeys[i].clip==anim.clip&&m->skinKeys[i].frame==anim.frame){
+                std::swap(m->skins[i],m->skins[m->skinUsed]);std::swap(m->skinKeys[i],m->skinKeys[m->skinUsed]);
+                copy=int(m->skinUsed++);break;
+            }
+        if(copy<0){
+            // Race UI pages and effects still load mid-race: new copies stay
+            // out of the measured overlay reserve in LINEAR memory. Past that an
+            // instance reuses a pose already skinned this frame.
+            const size_t bytes=m->model->vertexCount*sizeof(Vertex)+m->model->indexCount*sizeof(uint16_t);
+            if(m->skinUsed>=m->skins.size()&&linearSpaceFree()>allocationReserve+bytes)
+                if(auto fresh=cloneModel(*m->model)){m->skins.push_back(std::move(fresh));m->skinKeys.push_back({});}
+            if(m->skinUsed<m->skins.size()){
+                copy=int(m->skinUsed++);m->skinKeys[copy]={anim.palette?-1:anim.clip,anim.frame};
+                if(auto* deferred=deferredWrites()){
+                    const std::size_t bytes=std::size_t(bank->matrixCount())*12*sizeof(float);
+                    auto* w=static_cast<SkinWrite*>(deferred->allocate(sizeof(SkinWrite)+bytes));
+                    *w={bank,m->skins[copy].get(),m->litNormals,anim.clip,anim.frame};std::memcpy(w+1,palette,bytes);
+                    deferred->queue(writeSkin,w);
+                }else bank->skin(palette,*m->skins[copy],m->litNormals,anim.clip,anim.frame);
+                renderMetrics.skinnedVertices+=m->skins[copy]->vertexCount;
+            }else if(m->skinUsed)copy=int(m->skinUsed-1);
+            else return;
+        }
+        target=m->skins[copy].get();
+        if(m->resource=="quicksand"&&anim.bounds){
+            m->skins[copy]->minimum=anim.bounds->minimum;
+            m->skins[copy]->maximum=anim.bounds->maximum;
+        }
+    }
+    bool material=false;
+    if(bank&&!m->overrides.empty()&&(anim.pat>=0||anim.srt>=0||anim.clr>=0||anim.opacity!=1||anim.mirrorU)){
+        material=bank->material(anim.pat,anim.patFrame,anim.srt,anim.srtFrame,anim.clr,anim.clrFrame,m->overrides.data(),unsigned(m->overrides.size()));
+        for(auto& o:m->overrides){
+            if(anim.opacity!=1){o.tint[3]*=anim.opacity;o.flags|=SubmeshOverride::Tint;material=true;}
+            if(anim.mirrorU){
+                // BGteresa's authored SRT is identity: negate its U basis,
+                // including the second sampled layer if one exists.
+                for(unsigned base:{0u,6u}){o.uv[base]*=-1;o.uv[base+3]*=-1;}
+                o.flags|=SubmeshOverride::Uv;material=true;
+            }
+        }
+    }
+    if(m->firePhases&&!m->overrides.empty()){
+        const unsigned phase=m->firePhases->phase((unsigned(std::max(0.f,anim.srtFrame))/budget)*budget);
+        bool ready=int(phase)==m->firePhase;
+        if(!ready){
+            auto& texture=*m->model->textures[m->fireTexture];
+            if(auto* deferred=deferredWrites()){
+                auto* write=static_cast<FireTextureWrite*>(deferred->allocate(sizeof(FireTextureWrite)+m->firePhases->frameBytes));
+                *write={&texture,m->firePhases->frameBytes};
+                ready=m->firePhases->read(phase,write+1,write->bytes);
+                if(ready)deferred->queue(writeFireTexture,write);
+            }else{
+                ready=m->firePhases->read(phase,texture.gpu.data,texture.gpu.size);
+                if(ready)C3D_TexFlush(&texture.gpu);
+            }
+            if(ready){m->firePhase=int(phase);++renderMetrics.fireReads;}
+            else std::fprintf(stderr,"fireBPlane phase %u read failed\n",phase);
+        }
+        if(ready)for(auto& o:m->overrides){
+            m->firePhases->mapUv(o.uv);o.texture[0]=m->fireTexture;
+            o.flags|=SubmeshOverride::Uv|SubmeshOverride::Texture;material=true;
+        }
+    }
+    if(material){r.overrides=unsigned(list.overrides.size());r.overrideCount=unsigned(m->overrides.size());list.overrides.insert(list.overrides.end(),m->overrides.begin(),m->overrides.end());}
+    r.target=target;
+    list.records.push_back(r);
+}
+bool CourseObjects::reviewBounds(unsigned index,Vec3& center,float& radius){
+    auto& d=*impl_;
+    if(index>=d.visuals.size())return false;
+    const auto& v=d.visuals[index];
+    const ObjModel* model=v.main.model?v.main.model:v.extra[0].model;
+    if(!model)return false;
+    const auto* focus=reviewFocus(v);
+    const C3D_Mtx m=v.drawnValid?v.drawn:focus?objectMatrix(focus->transform(),focus->scale()):v.placement;
+    float rows[12];for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)rows[r*4+c]=m.r[r].c[3-c];
+    const auto b=transformBounds(model->bounds,rows);
+    center=(b.minimum+b.maximum)*.5f;radius=std::max(50.f,length(b.maximum-b.minimum)*.5f);
+    return true;
+}
+std::vector<CourseObjects::ReviewTarget> CourseObjects::reviewTargets(){
+    auto& d=*impl_;
+    if(!d.linked)d.link();
+    std::vector<ReviewTarget> out;
+    for(unsigned i=0;i<d.visuals.size();++i){
+        const auto& v=d.visuals[i];
+        bool seen=false;for(const auto& t:out)seen|=!std::strcmp(t.name,v.name);
+        if(seen)continue;
+        ReviewTarget t{};std::memcpy(t.name,v.name,sizeof t.name);t.visual=i;
+        if(reviewBounds(i,t.center,t.radius))out.push_back(t);
+    }
+    return out;
+}
+}

@@ -1,0 +1,6 @@
+numpy==2.5.3
+Pillow==12.3.0
+pycryptodome==3.23.0
+-e ./vendor/gclib
+
+unicorn==2.1.4

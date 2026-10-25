@@ -1,0 +1,23 @@
+{
+  "makerom": {
+    "version": "0.19.0",
+    "platforms": {
+      "darwin-arm64": {"url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-macos_arm64.zip", "sha256": "ea222647bf362d1aa0d8b7570dc65e7968ce6b3d7b103e9cc815a99698d930e0", "member": "makerom"},
+      "darwin-x86_64": {"url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-macos_x86_64.zip", "sha256": "a52563e5549cd2dd84e9b8d1cb0d1fdf15ea9bd0f6241e2e178fe4e4bf3a9277", "member": "makerom"},
+      "linux-x86_64": {"url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip", "sha256": "287b809dec064e0ad597e3d272c49ecb7eed41693d5ee6fef9d8a8aa24c2497e", "member": "makerom"},
+      "windows-x86_64": {"url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-win_x86_64.zip", "sha256": "88df4455e60556374e202d507f54ee03fac7493ec9554ab853157524b6d69db0", "member": "makerom.exe"}
+    }
+  },
+  "bannertool": {
+    "version": "1.2.2",
+    "url": "https://github.com/Epicpkmn11/bannertool/releases/download/v1.2.2/bannertool.zip",
+    "sha256": "e4259c08fe8944ebadd5f4b96f9a8603e5427338074cfc46323fbbc3410d51ed",
+    "members": {
+      "darwin-arm64": "mac-x86_64/bannertool",
+      "darwin-x86_64": "mac-x86_64/bannertool",
+      "linux-x86_64": "linux-x86_64/bannertool",
+      "windows-x86_64": "windows-x86_64/bannertool.exe"
+    }
+  },
+  "notes": "The Windows makerom and bannertool hashes equal the pins of 2gifts/melee-3ds tools/bootstrap_home_menu.py."
+}

@@ -1,0 +1,60 @@
+{
+  "kinoko": {
+    "url": "https://github.com/vabold/Kinoko",
+    "commit": "33ea3cfcf670e12e1450daf50a95a709176849fe"
+  },
+  "noclip": {
+    "url": "https://github.com/magcius/noclip.website",
+    "commit": "4cb7471c7631370faf5d526a56876d91ba24aca0"
+  },
+  "gclib": {
+    "url": "https://github.com/LagoLunatic/gclib",
+    "commit": "4e06db0004df411f1c806ad39b0e9a18ac4a1de5"
+  },
+  "nw4r_effect_reference": {
+    "url": "https://github.com/doldecomp/ogws",
+    "commit": "27fa94a593096eed7442efc4e70981fd52025b9c",
+    "license": "CC0-1.0",
+    "files": [
+      "src/nw4r/ef/ef_emitterform.cpp",
+      "src/nw4r/ef/emform/ef_disc.cpp"
+    ],
+    "usage": "Reference for disc emission and velocity cone mathematics; original game BREFF supplies effect parameters."
+  },
+  "citro3d": {
+    "url": "https://github.com/devkitPro/citro3d.git",
+    "commit": "9f21cf7b380ce6f9e01a0420f19f0763e5443ca7",
+    "patch": "patches/citro3d-hardware.patch"
+  },
+  "mkw_reference": {
+    "url": "https://github.com/snailspeed3/mkw",
+    "commit": "78572c95c41dbf6cbb7dd251a567e538560ce1d8",
+    "license": "CC0-1.0",
+    "usage": "Recovered AITrickHandler eligibility (AirStart and launch/action exclusions); path pursuit and item logic are native because the relevant implementation is absent.",
+    "files": [
+      "src/enemy/AITrickHandler.cpp"
+    ]
+  },
+  "cfl_mii": {
+    "url": "https://github.com/jamesrhg/cfl-mii",
+    "commit": "b85be4d66e9c89d203840cbe7fa0f638a44cdde2",
+    "path": "vendor/cfl-mii",
+    "provided": "locally patched source",
+    "license_status": "No explicit license found in bundled source or upstream root during 2026-10-25 review; permission must be clarified."
+  },
+  "cfl_tool": {
+    "url": "https://github.com/jamesrhg/cfl-tool",
+    "commit": "be72a29be54b04201372516aa64bab129e3ead7a",
+    "path": "vendor/cfl-tool",
+    "provided": false,
+    "usage": "Acquire separately for data/IconBody.iqm used by generate_native_icon.py.",
+    "license_status": "No explicit license identified in upstream repository metadata during 2026-10-25 review."
+  },
+  "pycgfx": {
+    "url": "https://github.com/skyfloogle/pycgfx.git",
+    "commit": "1f78850086f3a77c41e07162e842f97a5bf3c18a",
+    "provided": false,
+    "usage": "Animated HOME banner conversion only; acquire separately.",
+    "license_status": "No explicit license file found in the locally inspected pinned checkout."
+  }
+}
