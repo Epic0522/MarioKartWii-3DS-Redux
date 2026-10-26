@@ -190,6 +190,9 @@ source changes, and preserve third-party license notices.
 - **dudewhat** - original Mario Kart Wii 3DS port.
 - **MiniBandit** - the continuation this project builds on.
 - **Epic** - Redux development and integration.
+- **DarthMDev**: Old 3DS drawing performance fix, race sound fixes and menu cadence
+- **Codiak540**: Old 3DS performance testing and optimisation research (course-object detail distance, particle limit, performance log idea)
+- **janedoemk3ds**: Old 3DS performance research with Codiak540 (lighter models, visibility culling, faster course drawing; PR #40 in repo mkw-3ds)
 - **vabold / Kinoko** - Mario Kart Wii physics.
 - **noclip.website** - BRRES model parsing.
 - **LagoLunatic / gclib** - disc and texture utilities.
