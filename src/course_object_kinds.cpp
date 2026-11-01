@@ -1017,7 +1017,10 @@ bool classifyObject(Visual& v,const ObjectAssets& assets,int course){
     // Gold Mine flags already bake at load, but FlagB's far asset also has
     // different geometry/texture state (26 vs 58 triangles). Keep one baked
     // model at every distance so its colour cannot pop at the LOD boundary.
-    if(course==7&&(named(v,"FlagA1")||named(v,"FlagB1")))v.low={};
+    // Authored crowd/flag LODs carry different material/vertex-light data.
+    // Use the near appearance consistently; keep their animation and culling.
+    if(!std::strncmp(v.resource,"group_",6)||!std::strncmp(v.resource,"monte_",6)||
+       !std::strncmp(v.resource,"mare_",5)||!std::strncmp(v.resource,"Flag",4))v.low={};
     // DK's low asset replaces the live display with a split DK-logo atlas
     // (18 vertices); the live wl_screen1 face uses only 6. Its frame has the
     // same 570 vertices, so retaining the live mesh is also slightly cheaper.

@@ -146,26 +146,14 @@ bool ObjectAssets::load(int course){
                     else m->stadiumFace.include(p);
                 }
         }
-        // Peach Beach crowds currently produce black silhouettes through the
-        // light-texture combiner. Retain albedo, vertex shading, GX diffuse and
-        // fog, but bypass lm_0/lm_1 for these spectators. Animation and the
-        // regular rigid-mesh path remain unchanged.
-        const bool beachSpectator=course==16&&(!std::strncmp(resource,"group_",6)||
-            !std::strncmp(resource,"monte_",6)||!std::strncmp(resource,"mare_",5));
-        if(beachSpectator)for(auto& shape:m->model->submeshes)
-            if(((shape.lighting&retail::ChannelMask)>>retail::ChannelShift)==2){
-                shape.lighting=(shape.lighting&0x7ffu&~retail::ChannelMask)|(1u<<retail::ChannelShift);
-                shape.add=0;
-            }
+        // Keep the original spectator TEV/light-texture material intact.
+        // Model::load already bakes course diffuse and environment UV once;
+        // Renderer selects the fixed (not camera-sampled) map pair for it.
         // HW108: these small flag textures use trilinear GX mip sampling.
         // Keep the original base pixels/lighting, and avoid the PICA mip path
         // only for Gold Mine's flags, including both FlagB model LODs.
         if(course==7&&(!std::strcmp(resource,"FlagA1")||!std::strcmp(resource,"FlagB1")))
             for(auto& row:m->model->samplers)if(row[0].valid)row[0].minFilter&=1;
-        // Fixed local lighting for non-player spectators; this also allows
-        // weighted crowds to use the existing position-only GPU palette path.
-        if(!std::strncmp(resource,"group_",6)||!std::strncmp(resource,"monte_",6)||!std::strncmp(resource,"mare_",5))
-            m->model->freezeLighting();
         m->bounds={m->model->minimum,m->model->maximum};
         if(std::strcmp(bankName,"-")){
             m->bank=std::make_unique<ObjectBank>();std::snprintf(file,sizeof file,"models/%s.dobj",bankName);

@@ -190,10 +190,9 @@ void MenuSound::startBgm(UiPage page) {
  slot_ = slot_ == BgmSlots[0] ? BgmSlots[1] : BgmSlots[0];
  bgm_ = sound;
  SoundSystem::instance().finishCarriedMusic(20);
- // A rapid return can reuse a handle whose earlier music is still fading.
- // StartSound attaches the new sound; it does not stop the previous owner.
- SoundSystem::instance().stopSlot(slot_,0);
- SoundSystem::instance().play(sound, slot_);
+ // Retire every prior instance on the original BGM player and start its
+ // replacement in one audio-thread command (not separate Stop/Start posts).
+ SoundSystem::instance().playMusic(sound,slot_);
  // SinglePlayer::StartSound (806f4180): PrepareStreams with the current layer's stems.
  const int layer = layerOf(page);
  if (sound == id::SEQ_O_SELECT) {

@@ -19,6 +19,17 @@ WATER_WORDS={'water','sea','river','fountain','lake'}
 # changes: 'TR_houseALL' -> tr, house, all; 'water0_HIG' -> water, hig.
 def name_words(name):return {w.lower() for w in re.findall(r'[A-Z]+(?![a-z])|[A-Z]?[a-z]+',name)}
 
+def spectator_raster_alpha(prefix,shape,flags,alpha_factor):
+ # Opaque GX spectators can use raster alpha in their RGB lighting equation
+ # while writing a separate, constant final alpha (Noki: 0; castle crowd: 1/3).
+ # Flattening that final alpha into the vertices destroys their light mask.
+ word=(shape.get('retail') or {}).get('word',0)
+ rop=((shape.get('sourceMaterial') or {}).get('gxMaterial') or {}).get('ropInfo',{})
+ return bool(re.match(r'^obj\d+_(?:group_|monte_|mare_)',prefix)
+             and (word>>2)&3==2 and (flags>>20)&7==4 and not flags&3
+             and alpha_factor<1 and rop.get('blendMode')==0
+             and rop.get('alphaUpdate') is False)
+
 def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_textures=False,texture_prefix=None,encoded_textures=None,course_geometry=False,texture_overrides=None):
  # Models of one archive may share texture_prefix; encoded_textures names the
  # textures this run already wrote, so each is encoded once.
@@ -31,7 +42,7 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
  for t in data['textures']:
   raw=(source/(t['file']+'.bin')).read_bytes();palpath=source/(t['file']+'.pal');pal=palpath.read_bytes() if palpath.exists() else b''
   replacement=(texture_overrides or {}).get(t['name'])
-  exact_award_face=award_face_textures.selected(prefix,t['name']) and t['format']==14
+  exact_award_face=award_face_textures.selected(prefix,t['name']) and t['format']==14 and award_face_textures.needs_exact(raw,t['width'],t['height'])
   if replacement is not None:
    with Image.open(replacement) as prepared:im=prepared.convert('RGBA')
   elif exact_award_face:im=award_face_textures.decode(raw,t['width'],t['height'])
@@ -99,6 +110,7 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
    shapes.append({k:v for k,v in shape.items() if k!='vertices'})
    flags,alpha_factor,vertex_alpha,alpha_limit,alpha_mix,extended=material_state(shape)
    fixed_menu_alpha=bool((shape.get('retail') or {}).get('word',0)&(1<<21) and (flags>>20)&7==4)
+   preserve_raster_alpha=fixed_menu_alpha or spectator_raster_alpha(prefix,shape,flags,alpha_factor)
    # Bit 29 is an unused alpha-reference selector whenever alpha test is off.
    # Reuse it for a restrained aqua grade on water whose TEV equation has no
    # translation (the fallback samples its indirect wave mask as colour); the
@@ -119,7 +131,7 @@ def cook(source,out,prefix,max_texture=256,preserve_vertices=False,reuse_texture
      points=local_triangle(points,flags,shape['animationFrames']>0)
     for v in points:
      if not all(math.isfinite(x) for x in v):raise ValueError('non-finite vertex')
-     rgba=v.copy();rgba[-1]=v[-1] if fixed_menu_alpha else round((v[-1] if vertex_alpha else 255)*alpha_factor)
+     rgba=v.copy();rgba[-1]=v[-1] if preserve_raster_alpha else round((v[-1] if vertex_alpha else 255)*alpha_factor)
      tri.append(struct.pack('<10f4B',*rgba))
     if len(vertices)+3>60000:flush()
     tex=shape['texture']

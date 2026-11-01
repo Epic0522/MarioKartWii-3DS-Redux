@@ -17,6 +17,7 @@ def soften_head_nod(poses,slot=6):
         angle=target-elevation;lift=np.eye(3)+math.sin(angle)*k+(1-math.cos(angle))*(k@k)
         frame[slot,:,:3]=lift@r
     return poses
+
 UPPER_BODY_SLOTS=(2,3,4,5,6)
 def soften_torso_lean(poses):
     # Source palettes are global. Preserve the authored steering-arm chain

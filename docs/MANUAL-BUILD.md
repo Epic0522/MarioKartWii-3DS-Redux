@@ -1,6 +1,6 @@
 # Manual build operations
 
-Version 0.8.14 / HW137. No operation below runs the next section. There is no
+Version 0.9.2 / HW141. No operation below runs the next section. There is no
 build script, Makefile, CI job, download/bootstrap helper or resume driver.
 Examples are individual commands. Replace paths yourself and inspect output
 before proceeding. Keep inputs and outputs outside the publication tree.
@@ -197,19 +197,19 @@ banner, title version and output path. The template's APP_REMASTER (and
 APP_ROMFS if retained) must be provided explicitly. The project supplies no
 automatic version counter or CIA package builder; no prebuilt CGFX is supplied.
 
-An external-SD HW137 example, after preparing all inputs yourself:
+An external-SD HW141 example, after preparing all inputs yourself:
 
 ```sh
-makerom -f cia -target t -exefslogo -elf /external/mkw-3ds.elf -rsf /external/external-sd.rsf -icon /external/icon.icn -banner /external/banner.bnr -ver 142 -DAPP_REMASTER=0 -o /external/MKW-3DS-v0.8.14.cia
+makerom -f cia -target t -exefslogo -elf /external/mkw-3ds.elf -rsf /external/external-sd.rsf -icon /external/icon.icn -banner /external/banner.bnr -ver 146 -DAPP_REMASTER=0 -o /external/MKW-3DS-v0.9.2.cia
 ```
 
-The version is chosen manually: 0.8.14 packs as 142. There is no version
+The version is chosen manually: 0.9.2 packs as 146. There is no version
 incrementer. This external-SD RSF must have its RomFs block removed; mounting
 an empty embedded RomFS would hide the game's SD resource path.
 
 Some makerom builds use an internal version macro that conflicts with the
 requested title version. Inspect the final CIA's actual Ticket/TMD version
-and content; for 0.8.14 the title version must be 142. A successful makerom exit does not
+and content; for 0.9.2 the title version must be 146. A successful makerom exit does not
 establish correct versioning or gameplay. Copy resources to SD manually and
 preserve your own saves. No emulator or console is launched automatically.
 

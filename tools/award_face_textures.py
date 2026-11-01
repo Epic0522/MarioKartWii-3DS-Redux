@@ -7,7 +7,20 @@ import struct
 from PIL import Image
 
 def selected(prefix,name):
-    return (prefix in ('award_unpacked_Award_bpc_0','award_unpacked_Award_bds_0') and name.startswith(('bpc_eye.','bds_eye.'))) or name=='funky_all'
+    # Every driver expression path (race, menu, award, staff and LOD) uses
+    # the same source faces. Alpha-zero CMPR RGB is visible to opaque TEV.
+    return '_eye' in name.lower() or '_face' in name.lower() or '_mouth' in name.lower() or name=='funky_all'
+
+
+def needs_exact(raw,width,height):
+    # GX's transparent entry is only present in the endpoint-ordered mode.
+    # Keep ordinary opaque textures compressed; they have no hidden RGB to lose.
+    for at in range(0,len(raw),8):
+        a,b,bits=struct.unpack_from('>HHI',raw,at)
+        if a<=b and (a or b) and any((bits>>(2*i))&3==3 for i in range(16)):
+            return True
+    return False
+
 
 def decode(raw,width,height):
     out=Image.new('RGBA',(width,height));px=out.load();at=0

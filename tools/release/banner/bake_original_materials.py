@@ -24,7 +24,6 @@ lighting['textures']=parse_blmap((WORK/'source/menu_lighting/default.blmap').rea
 positions=np.load(WORK/'exports/mario_action_positions.npz')['good']
 normals=np.load(WORK/'exports/mario_action_normals.npz')['good']
 BAKE_FRAME=12
-TILE=32
 CAMERA=np.array([240.,200.,320.])
 TARGET=np.array([0.,62.,5.])
 unit=lambda x:x/np.maximum(1e-12,np.linalg.norm(x,axis=-1,keepdims=True))
@@ -171,34 +170,55 @@ def bake_model(key,folder_name,model_name,animated=False):
     data=datasets[folder_name];folder=WORK/'exports'/folder_name
     model=next(m for m in data['models'] if m['name']==model_name)
     count=sum(len(s['vertices'])//3 for s in model['shapes'])
-    grid=1<<math.ceil(math.log2(math.ceil(math.sqrt(count))))
-    size=grid*TILE
+    tiles=[];cursor=0
+    for shape in model['shapes']:
+        vs=np.array(shape['vertices'])
+        texture=data['textures'][shape['texture']]
+        if shape['material']=='mario_eye_tx':texture=next(t for t in data['textures'] if t['name']==recipe['selectedFaceTexture'])
+        for start in range(0,len(vs),3):
+            tri=vs[start:start+3]
+            span=np.ptp(tri[:,6:8],axis=0)*[texture['width'],texture['height']]
+            sizes=[max(16,min(128,1<<math.ceil(math.log2(max(1,float(v)+5))))) for v in span]
+            tiles.append(dict(shape=shape,tri=tri,sourceStart=cursor+start,w=sizes[0],h=sizes[1]))
+        cursor+=len(vs)
+    # Power-of-two rectangles, packed in descending-height shelves. Atlas
+    # texel density follows each face's source texture footprint; logos and
+    # long checker strips no longer get the same tiny cell as tiny polygons.
+    area=sum(t['w']*t['h'] for t in tiles)
+    size=max(max(max(t['w'],t['h']) for t in tiles),1<<math.ceil(math.log2(math.sqrt(area*1.15))))
+    while True:
+        x=y=shelf=0;fits=True
+        for t in sorted(tiles,key=lambda t:(-t['h'],-t['w'])):
+            if x+t['w']>size:x=0;y+=shelf;shelf=0
+            if y+t['h']>size:fits=False;break
+            t['x']=x;t['y']=y;x+=t['w'];shelf=max(shelf,t['h'])
+        if fits:break
+        size*=2
     atlas=np.zeros((size,size,4),dtype=np.uint8)
     atlas[:,:,3]=255
-    source_vertices=[];baked_uv=[];tri_index=0;cursor=0;material_info=[]
-    yy,xx=np.mgrid[0:TILE,0:TILE]
-    w1=(xx.ravel()+.5-2.5)/(TILE-5)
-    w2=(yy.ravel()+.5-2.5)/(TILE-5)
-    weights=np.column_stack((1-w1-w2,w1,w2));weights=np.maximum(weights,0);weights/=weights.sum(1,keepdims=True)
+    source_vertices=[];baked_uv=[];material_info=[];weight_cache={}
     for shape in model['shapes']:
         vs=np.array(shape['vertices'])
         material_info.append(dict(name=shape['material'],triangles=len(vs)//3,
                                   originalSamplers=[s['name'] for s in shape['sourceMaterial']['samplers']],
                                   stages=len(shape['sourceMaterial']['gxMaterial']['tevStages'])))
-        for start in range(0,len(vs),3):
-            tri=vs[start:start+3]
-            ns=normals[BAKE_FRAME,cursor+start:cursor+start+3] if animated else tri[:,3:6]
-            pixels=np.clip(np.rint(material_samples(folder,data,shape,weights,tri,ns)*255),0,255).astype(np.uint8).reshape(TILE,TILE,4)
-            bx=(tri_index%grid)*TILE;by=(tri_index//grid)*TILE
-            atlas[by:by+TILE,bx:bx+TILE]=pixels
-            coords=[(bx+2.5,by+2.5),(bx+TILE-2.5,by+2.5),(bx+2.5,by+TILE-2.5)]
-            baked_uv.extend([[x/size,1-y/size] for x,y in coords]);source_vertices.extend(tri.tolist())
-            tri_index+=1
-        cursor+=len(vs)
+    for tile in tiles:
+        shape=tile['shape'];tri=tile['tri'];start=tile['sourceStart'];w=tile['w'];h=tile['h']
+        if (w,h) not in weight_cache:
+            yy,xx=np.mgrid[0:h,0:w]
+            w1=(xx.ravel()+.5-2.5)/(w-5);w2=(yy.ravel()+.5-2.5)/(h-5)
+            weights=np.column_stack((1-w1-w2,w1,w2));weights=np.maximum(weights,0);weights/=weights.sum(1,keepdims=True)
+            weight_cache[(w,h)]=weights
+        weights=weight_cache[(w,h)]
+        ns=normals[BAKE_FRAME,start:start+3] if animated else tri[:,3:6]
+        pixels=np.clip(np.rint(material_samples(folder,data,shape,weights,tri,ns)*255),0,255).astype(np.uint8).reshape(h,w,4)
+        bx,by=tile['x'],tile['y'];atlas[by:by+h,bx:bx+w]=pixels
+        coords=[(bx+2.5,by+2.5),(bx+w-2.5,by+2.5),(bx+2.5,by+h-2.5)]
+        baked_uv.extend([[x/size,1-y/size] for x,y in coords]);source_vertices.extend(tri.tolist())
     image=OUT/(key+'.png');Image.fromarray(atlas).save(image)
     item=dict(key=key,folder=folder_name,model=model_name,animated=animated,triangles=count,
               atlas=image.name,atlasSize=size,sourceVertices=source_vertices,bakedUV=baked_uv,
-              materials=material_info)
+              materials=material_info,atlasOccupiedPixels=area,adaptiveSourceTexelDensity=True)
     print('BAKED',key,count,'triangles',size,'pixels')
     return item
 

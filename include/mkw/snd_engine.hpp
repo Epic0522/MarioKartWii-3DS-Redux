@@ -272,6 +272,8 @@ public:
  // Maintenance frames during a stalled game advance fades but cannot
  // expire HoldSound: the game has not had a chance to renew its handles.
  void updateGameFrame(bool advanceHold = true);
+ // Input-owned HoldSound expiry; independent from the audio-owned 60 Hz clock.
+ void updateHoldFrame();
  // Sound frame (3 ms): sequencer ticks, channel envelopes, voice params.
  void updateSoundFrame();
  const EngineStats& stats() const;

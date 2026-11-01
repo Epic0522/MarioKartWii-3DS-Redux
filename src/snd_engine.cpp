@@ -1643,6 +1643,13 @@ void Engine::pausePlayer(u32 player, bool p, int frames) { if (impl_->sounds) fo
 int Engine::playingCount(u32 player) const { return impl_->sounds ? impl_->sounds->countPlayer(player) : 0; }
 void Engine::setMasterVolume(f32 v) { impl_->masterVolume = clamp(v, 0.0f, 1.0f); }
 void Engine::updateGameFrame(bool advanceHold) { impl_->gameFrame(advanceHold); }
+void Engine::updateHoldFrame() {
+ if (!impl_->sounds) return;
+ for (auto& s : impl_->sounds->sound) if (s.used && s.autoStop && s.playerActive()) {
+  if (s.autoStopCounter == 0) impl_->sounds->stop(s, 0);
+  else --s.autoStopCounter;
+ }
+}
 void Engine::updateSoundFrame() { impl_->soundFrame(); }
 void setObserver(Engine& engine, EngineObserver* observer) { engine.impl_->observer = observer; }
 u32 soundFrameCount(const Engine& engine) { return engine.impl_->soundFrames; }

@@ -44,7 +44,6 @@ for name in ('mario_1st', 'standard_kart'):
                 atlas.paste(ImageOps.flip(im),(0,0));atlas.paste(im,(0,im.height));im=atlas
             im.save(folder/f'{tex["file"]}_mirror_{ws}_{wt}.png')
 
-
 bank = (WORK / 'exports/mario_all_actions.dskm').read_bytes()
 magic, version, vertices, palettes, clips, shapes, pat_clips = struct.unpack_from('<4s6I', bank)
 assert magic == b'DSKM' and version in (5, 8)
@@ -109,7 +108,7 @@ receipt = dict(selectedClip='good', previewFPS=60, sourceFrames=49,
                chassisHeight=height, seatOffset=[0,*seat],
                wheelScale=list(display[15:18]), wheels=wheels, candidates=metadata,
                selectedFaceTexture='mario_eye.3',sourceFacePAT0='good',
-               bumperAppearance='Original material and UVs, including red/white upper lip.',
+               bumperAppearance='Original material and UVs restored, including original red/white upper lip. ',
                previewMaterial='Original albedo and mesh, simplified Blender lighting; Wii GX shader is retained in source JSON but not reproduced by this preview.')
 (WORK/'exports/scene_recipe.json').write_text(json.dumps(receipt, indent=2)+'\n')
 for m in metadata:

@@ -2521,7 +2521,7 @@ int main() {
                 signals.speed=kart->move()->speed();
                 signals.drift=kart->status().onBit(K::Kart::eStatus::DriftManual,K::Kart::eStatus::DriftAuto);
                 signals.driftDirection=kart->move()->hopStickX();signals.boost=boost>0;signals.trick=inTrick;
-                signals.hit=kart->status().onBit(K::Kart::eStatus::InAction,K::Kart::eStatus::Burnout,K::Kart::eStatus::Shocked);
+                signals.hit=kart->status().onBit(K::Kart::eStatus::InAction,K::Kart::eStatus::Burnout);
                 signals.finished=fullRace?raceGrid.finished():K::System::RaceManager::Instance()->stage()==K::System::RaceManager::Stage::FinishGlobal;
                 if(fullRace)signals.finishType=mkw::driverFinishType(raceGrid.rank(),K::System::RaceConfig::Instance()->raceScenario().playerCount);
                 signals.accelerating=kart->status().onBit(K::Kart::eStatus::Accelerate);signals.braking=kart->status().onBit(K::Kart::eStatus::Brake);

@@ -138,10 +138,10 @@ remove its RomFs block for an external-SD build. Then invoke makerom with
 your compiled ELF and prepared HOME assets:
 
 ```sh
-makerom -f cia -target t -exefslogo -elf /external/mkw-3ds.elf -rsf /external/external-sd.rsf -icon /external/icon.icn -banner /external/banner.bnr -ver 142 -DAPP_REMASTER=0 -o /external/MKW-3DS-v0.8.14.cia
+makerom -f cia -target t -exefslogo -elf /external/mkw-3ds.elf -rsf /external/external-sd.rsf -icon /external/icon.icn -banner /external/banner.bnr -ver 146 -DAPP_REMASTER=0 -o /external/MKW-3DS-v0.9.2.cia
 ```
 
-Version 0.8.14 uses title version 142. Check the resulting Ticket/TMD version
+Version 0.9.2 uses title version 146. Check the resulting Ticket/TMD version
 and contents; some makerom builds have a version-macro collision described
 in [the packaging notes](docs/MANUAL-BUILD.md#6-create-home-assets-and-cia-manually).
 
