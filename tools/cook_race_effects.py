@@ -634,6 +634,7 @@ def cook(root, output, course_only=False, balloon_only=False, coin_only=False, c
                            ('koopa_course', 'FlamePole', ['rk_flamePole', 'rk_flamePoleFoot']),
                            ('volcano_course', 'FlamePole_v', ['rk_flamePole', 'rk_flamePoleFoot']),
                            ('old_koopa_64', 'FlamePole_v_big', ['rk_flamePoleL']),
+                           ('old_koopa_64', 'KoopaFigure64', ['rk_koopaFire', 'rk_koopaFireL']),
                            ('koopa_course', 'dossun', ['rk_dossun']),
                            ('sand_battle', 'quicksand', ['rk_qsandDossun']),
                            ('desert_course', 'sanbo', ['rk_sanbo']),
@@ -657,7 +658,7 @@ def cook(root, output, course_only=False, balloon_only=False, coin_only=False, c
         # original descriptors/curves differ. Keep the battle archive distinct.
         alias = (lambda name: 'W_' + name) if archive == 'truckChimSmkW' else (lambda name: name)
         course_roots[archive] = [alias(name) for name in roots]
-        effect_name = {'DonkyCannon_wii':'dkCannon', 'hanachan':'hana', 'Steam':'steam', 'Alarm':'alarm', 'choropu':'choropuMoko', 'Epropeller':'epropeller', 'VolcanoBall1':'volc', 'FlamePole':'flamePole', 'FlamePole_v':'flamePole', 'FlamePole_v_big':'flamePoleL', 'Block':'block', 'quicksand':'qsandDossun'}.get(archive, archive)
+        effect_name = {'DonkyCannon_wii':'dkCannon', 'hanachan':'hana', 'Steam':'steam', 'Alarm':'alarm', 'choropu':'choropuMoko', 'Epropeller':'epropeller', 'VolcanoBall1':'volc', 'FlamePole':'flamePole', 'FlamePole_v':'flamePole', 'FlamePole_v_big':'flamePoleL', 'KoopaFigure64':'koopaFire', 'Block':'block', 'quicksand':'qsandDossun'}.get(archive, archive)
         path = root / f'assets/courses/{course}/effect/{archive}/rk_{effect_name}.breff'
         source, pixels = path.read_bytes(), path.with_suffix('.breft').read_bytes()
         index, pixel_index = entries(source), entries(pixels)
@@ -765,5 +766,5 @@ if __name__ == '__main__':
     p.add_argument('--balloon-only', action='store_true', help='Stage the ten Balloon Battle banks without touching shared banks or generated headers')
     p.add_argument('--coin-only', action='store_true', help='Stage ten Coin Runners banks and their original coin archive dependencies')
     a = p.parse_args()
-    # Build-local output; tools/resource_manifest.py overlays it onto the SD assets.
+    # Build-local output; tools/package_sd.py overlays it onto the SD assets.
     cook(a.root, a.output or a.root / 'build/vfx/textures', a.course_only, a.balloon_only, a.coin_only, a.course_id)

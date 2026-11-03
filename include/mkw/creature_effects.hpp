@@ -28,6 +28,7 @@
 #include <game/field/obj/ObjectFlamePoleV.hh>
 #include <mkw/hanachan_joint_assets.hpp>
 #include <game/field/obj/ObjectKoopaFigure.hh>
+#include <game/field/obj/ObjectKoopaFigure64.hh>
 #include <mkw/cannon_effect_assets.hpp>
 #include <cstring>
 #include <array>
@@ -54,6 +55,8 @@ public:
     static_assert(ChimneyFirstSlot+MaxChimneys*ChimneySlots<=RaceEffects::SlotCount);
     static constexpr unsigned FlameFirstSlot=1914,MaxFlames=32;
     static_assert(FlameFirstSlot+2*MaxFlames<=RaceEffects::SlotCount);
+    static constexpr unsigned N64StatueFirstSlot=1978,MaxN64Statues=5;
+    static_assert(N64StatueFirstSlot+MaxN64Statues<=RaceEffects::SlotCount);
     bool bind(RaceEffects& effects){
         flameSpecs_[0]=effects.find("rk_flamePole");flameSpecs_[1]=effects.find("rk_flamePoleFoot");flameSpecs_[2]=effects.find("rk_flamePoleL");
         for(unsigned i=0;i<3;++i){flameOffsets_[i]={};if(flameSpecs_[i]>=0){
@@ -78,6 +81,7 @@ public:
         crabSpecs_[2]=effects.find("rk_crab");
         cannonSmoke_=effects.find("rk_dkCannon");cannonSnow_=effects.find("rk_dkCannonSnw");
         koopaBreath_=effects.find("rk_koopaBallS");
+        n64FireSpecs_[0]=effects.find("rk_koopaFire");n64FireSpecs_[1]=effects.find("rk_koopaFireL");
         thwompDust_=effects.find("rk_dossun");
         desertImpact_=effects.find("rk_qsandDossun");
         pokeySand_=effects.find("rk_sanbo");
@@ -86,7 +90,7 @@ public:
         factorySpecs_[0]=effects.find("rk_steam");factorySpecs_[1]=effects.find("rk_alarm");
         return effects.ready; // Course-specific required roots are validated by the loader.
     }
-    void reset(){flames_={};flameCount_=0;thwomps_={};thwompCount_=0;piles_={};pileCount_=0;chimneys_={};chimneyCount_=0;leaves_={};leafCount_=0;wood_={};woodCount_=0;blocks_={};blockCount_=0;volcano_={};volcanoCount_=0;propellers_={};propellerCount_=0;rocks_={};rockCount_=0;moles_={};moleCount_=0;factory_={};factoryCount_=0;hanachan_={};hanachanCount_=0;count_=0;crabCount_=0;linked_=false;owners_={};crabs_={};cannon_=nullptr;cannonSerial_=0;statues_={};statueCount_=0;pokeys_={};pokeyCount_=0;}
+    void reset(){flames_={};flameCount_=0;thwomps_={};thwompCount_=0;piles_={};pileCount_=0;chimneys_={};chimneyCount_=0;leaves_={};leafCount_=0;wood_={};woodCount_=0;blocks_={};blockCount_=0;volcano_={};volcanoCount_=0;propellers_={};propellerCount_=0;rocks_={};rockCount_=0;moles_={};moleCount_=0;factory_={};factoryCount_=0;hanachan_={};hanachanCount_=0;count_=0;crabCount_=0;linked_=false;owners_={};crabs_={};cannon_=nullptr;cannonSerial_=0;statues_={};statueCount_=0;n64Statues_={};n64StatueCount_=0;pokeys_={};pokeyCount_=0;}
     void step(RaceEffects& effects){
         namespace K=Kinoko;
         if(!linked_){
@@ -144,6 +148,8 @@ public:
                 const auto* flow=director->flowTable().set(director->flowTable().slot(id));
                 if(flow&&(!std::strcmp(flow->name,"Steam")||!std::strcmp(flow->name,"Alarm"))&&factoryCount_<factory_.size())
                     factory_[factoryCount_++]=static_cast<const K::Field::ObjectFactoryEffect*>(object);
+                if(id==K::Field::ObjectId::KoopaFigure64&&n64StatueCount_<MaxN64Statues)
+                    n64Statues_[n64StatueCount_++]=static_cast<const K::Field::ObjectKoopaFigure64*>(object);
                 if(flow&&!std::strcmp(flow->name,"koopaFigure")&&statueCount_<statues_.size())
                     statues_[statueCount_++].object=static_cast<const K::Field::ObjectKoopaFigure*>(object);
                 if(flow&&!cannon_&&K::Field::ObjectCannon::matches(flow->name))
@@ -380,6 +386,19 @@ public:
             const bool desert=thwomp.mapObj()&&thwomp.mapObj()->id()==0x20c;
             effects.burst(desert?desertImpact_:thwompDust_,frame);
         }
+        for(unsigned i=0;i<n64StatueCount_;++i){
+            const auto& statue=*n64Statues_[i];const auto& pose=statue.transform();
+            auto vec=[](const K::EGG::Vector3f& v){return Vec3{v.x,v.y,v.z};};
+            EffectFrame frame;frame.origin=vec(statue.pos());
+            const float scale=statue.scale().x;
+            frame.x=vec(pose.base(0))*scale;frame.y=vec(pose.base(1))*scale;frame.z=vec(pose.base(2))*scale;
+            const unsigned slot=N64StatueFirstSlot+i;
+            // RMCU806ecf04..cf50 creates and moves the original root each active frame;
+            // +0x10 fade ends emission and lets existing particles finish.
+            if(statue.fireActive())effects.create(slot,n64FireSpecs_[statue.bigStatue()?1:0],frame,0);
+            else effects.fade(slot);
+            effects.move(slot,frame);
+        }
         for(unsigned i=0;i<statueCount_;++i){
             auto& owner=statues_[i];const auto& statue=*owner.object;
             if(owner.serial==statue.breathSerial())continue;
@@ -524,6 +543,8 @@ private:
     std::array<const Kinoko::Field::ObjectSanbo*,MaxPokeys> pokeys_{};
     unsigned pokeyCount_=0;
     int pokeySand_=-1;
+    std::array<const Kinoko::Field::ObjectKoopaFigure64*,MaxN64Statues> n64Statues_{};
+    unsigned n64StatueCount_=0;int n64FireSpecs_[2]{-1,-1};
     struct StatueOwner {const Kinoko::Field::ObjectKoopaFigure* object=nullptr;unsigned serial=0;};
     std::array<StatueOwner,4> statues_{};
     unsigned statueCount_=0;

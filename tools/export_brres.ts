@@ -729,6 +729,15 @@ function lighting(material:any){
   mode=0;scale=0;firstScale=0;colorLerp=false;constantLerp=false;vertexTint=undefined;
   unsupported.delete(material.name);
  }
+ // Thunder Cloud eyes: lit eye albedo plus the original white EnvCamera highlight.
+ if(material.name==='kumo_eye_m'&&stages.length===2&&eq(stages[0],[15,10,8,15])&&
+    eq(stages[1],[15,12,8,0])&&material.samplers[1]?.name==='kumo'&&material.texSrts[1]?.mapMode===1){
+  const m=material.texSrts[1].srtMtx;
+  reflection={mode:2,constant:0x00ffffff,add:0,uv:[m[0],m[4],m[12],m[1],m[5],m[13]]};
+  primaryMap=0;primaryCoord=0;secondaryMap=1;secondaryCoord=1;
+  mode=0;scale=0;firstScale=0;colorLerp=false;constantLerp=false;vertexTint=undefined;
+  unsupported.delete(material.name);
+ }
  // Original background metal: clamp(albedo*C0 + normal-reflection - 0.5)
  // followed by the raster colour. The second map uses GX EnvCamera mapping.
  if(menuMaterials&&stages.length===3&&eq(stages[0],[15,8,2,15])&&

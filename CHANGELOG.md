@@ -99,6 +99,8 @@ Changes retained on top of the existing port, grouped by feature; withdrawn expe
 
 # Race flow, cameras and CPU drivers
 
+- Corrected the paired hallway Thwomps' return path and final turn angle on N64 Bowser's Castle.
+
 - Stopped the lightning shrink timer from repeatedly triggering the damage animation after the initial reaction ends.
 - Restored cup, course, mode and engine-class information during course intros.
 - Extended intro text coverage to Battle arenas.
@@ -211,6 +213,10 @@ Changes retained on top of the existing port, grouped by feature; withdrawn expe
 
 # Scene materials and rendering
 
+- Restored the original white environment highlights in the Thunder Cloud's eyes.
+
+- Restored the original lava color layers on N64 Bowser's Castle, including lava pillars and splash models.
+
 - Restored spectators' original light-texture combinations and kept their lighting maps fixed.
 - Restored the original internal lighting alpha for Peach Beach Nokis and a Bowser Castle crowd material to correct their dark appearance.
 - Kept spectator crowds at their near-model appearance to prevent distance-dependent lighting changes.
@@ -246,6 +252,8 @@ Changes retained on top of the existing port, grouped by feature; withdrawn expe
 - Regenerated Bowser's Castle rotating-corridor minimap frames without the roof.
 
 # Particles and visual effects
+
+- Restored the original large and small statue fire effects and proximity triggers on N64 Bowser's Castle.
 
 - Added missing vehicle particles for starts, burnouts, drifting, landings and road contact.
 - Added missing activation and stopping conditions for leaf-area and chimney particles.

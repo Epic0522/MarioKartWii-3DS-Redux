@@ -3677,6 +3677,18 @@ new mode 100755
 diff --git a/source/game/field/obj/ObjectDossunTsuibiHolder.cc b/source/game/field/obj/ObjectDossunTsuibiHolder.cc
 old mode 100644
 new mode 100755
+index 7737332..ace42c9
+--- a/source/game/field/obj/ObjectDossunTsuibiHolder.cc
++++ b/source/game/field/obj/ObjectDossunTsuibiHolder.cc
+@@ -133 +133,3 @@ void ObjectDossunTsuibiHolder::calcBackwards() {
+-    updatePos(EGG::Vector3f(pos().x, pos().y, m_lastStompZ));
++    // RMCU 80756048: return X/Y follow the rail; retain only stomp Z.
++    const auto &railPos = m_railInterpolator->curPos();
++    updatePos(EGG::Vector3f(railPos.x, railPos.y, m_lastStompZ));
+@@ -143 +145,2 @@ void ObjectDossunTsuibiHolder::calcRot() {
+-            updateRot(rot().y + F_PI);
++            // RMCU 807556f4: finish at the initial heading plus half a turn.
++            updateRot(m_initRotY + F_PI);
 diff --git a/source/game/field/obj/ObjectDossunTsuibiHolder.hh b/source/game/field/obj/ObjectDossunTsuibiHolder.hh
 old mode 100644
 new mode 100755
@@ -5401,23 +5413,58 @@ index 9ff7961..ad95f27
 diff --git a/source/game/field/obj/ObjectKoopaFigure64.cc b/source/game/field/obj/ObjectKoopaFigure64.cc
 old mode 100644
 new mode 100755
-index b2afa76..f5a83a5
+index b2afa76..31f9231
 --- a/source/game/field/obj/ObjectKoopaFigure64.cc
 +++ b/source/game/field/obj/ObjectKoopaFigure64.cc
-@@ -53,6 +53,10 @@ void ObjectKoopaFigure64::calc() {
-         disableCollision();
-     }
- 
-+    if (m_cycleFrame < FIRE_DURATION) {
-+        cueSound(0x35d, SoundCall::Hold); // SE_CR_64K_FIGURE_FRAME
-+    }
-+
-     ++m_cycleFrame;
- }
- 
+@@ -5,0 +6,3 @@
++#include "game/system/RaceConfig.hh"
++#include "game/kart/KartObjectManager.hh"
++#include "game/kart/KartObject.hh"
+@@ -43,7 +46,11 @@ void ObjectKoopaFigure64::calc() {
+-    bool endOfCycle = CYCLE_DURATION == m_cycleFrame;
+-    if (endOfCycle) {
+-        m_cycleFrame = 0;
+-
+-        if (m_isBigStatue) {
+-            enableCollision();
+-        }
++    // RMCU806ecd58..ed030: normal races restart only when the sampled
++    // kart is within setting0 in XZ; TT/Ghost cycles independently of proximity.
++    using Mode = System::RaceConfig::Scenario::GameMode;
++    const auto mode = System::RaceConfig::Instance()->raceScenario().gameMode;
++    const bool independent = mode == Mode::Time_Trial || mode == Mode::Ghost_Race;
++    auto *karts = Kart::KartObjectManager::Instance();
++    bool inRange = false;
++    if (karts && karts->count()) {
++        const auto delta = karts->object(timer % karts->count())->pos() - pos();
++        const f32 range = static_cast<f32>(m_mapObj->setting(0));
++        inRange = delta.x * delta.x + delta.z * delta.z < range * range;
+@@ -51,3 +58,4 @@ void ObjectKoopaFigure64::calc() {
+-
+-    if (m_cycleFrame >= FIRE_DURATION && !endOfCycle && m_isBigStatue) {
+-        disableCollision();
++    m_fireActive = m_cycleFrame < FIRE_DURATION;
++    if (m_cycleFrame == CYCLE_DURATION && (independent || inRange)) {
++        m_cycleFrame = 0;
++        if (m_isBigStatue) enableCollision();
+@@ -54,0 +63,3 @@ void ObjectKoopaFigure64::calc() {
++    if (m_cycleFrame >= FIRE_DURATION && m_isBigStatue) disableCollision();
++    if (m_fireActive) cueSound(0x35d, SoundCall::Hold);
++    if (m_cycleFrame < CYCLE_DURATION) ++m_cycleFrame;
+@@ -56 +66,0 @@ void ObjectKoopaFigure64::calc() {
+-    ++m_cycleFrame;
 diff --git a/source/game/field/obj/ObjectKoopaFigure64.hh b/source/game/field/obj/ObjectKoopaFigure64.hh
 old mode 100644
 new mode 100755
+index 797553b..cf2f5e8
+--- a/source/game/field/obj/ObjectKoopaFigure64.hh
++++ b/source/game/field/obj/ObjectKoopaFigure64.hh
+@@ -38,0 +39,3 @@ public:
++    bool fireActive() const { return m_fireActive; }
++    bool bigStatue() const { return m_isBigStatue; }
++
+@@ -42,0 +46 @@ private:
++    bool m_fireActive = false;
 diff --git a/source/game/field/obj/ObjectKuribo.cc b/source/game/field/obj/ObjectKuribo.cc
 old mode 100644
 new mode 100755
