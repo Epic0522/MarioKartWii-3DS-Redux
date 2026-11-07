@@ -213,6 +213,8 @@ Changes retained on top of the existing port, grouped by feature; withdrawn expe
 
 # Scene materials and rendering
 
+- Smoothed item-box detail changes by blending the original sampled colours while retaining their sparkle pass.
+
 - Restored the original white environment highlights in the Thunder Cloud's eyes.
 
 - Restored the original lava color layers on N64 Bowser's Castle, including lava pillars and splash models.

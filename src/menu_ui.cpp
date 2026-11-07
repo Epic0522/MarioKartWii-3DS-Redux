@@ -699,12 +699,17 @@ public:
   // The normal footer uses complete 51px BRFNT cells, at LCD y222/h14.
   // Whole fragments preserve CWDH advances and their shared baseline.
   constexpr float height=14.f,icon=14.f,y=222.f;
+  const unsigned stars=grade>=1&&grade<=3?4-grade:0;
+  constexpr float starHeight=18.f,starGap=2.f;
+  const auto& starRect=CupRecordIconRects[5];
+  const float starWidth=starHeight*float(starRect[2])/float(starRect[3]);
+  const float gradeWidth=stars?stars*starWidth+(stars-1)*starGap:icon;
   auto fragment=[&](const char* value){char key[40];
    if(!std::strcmp(value,label))std::snprintf(key,sizeof key,"menu_record_class_%u",cc);
    else std::snprintf(key,sizeof key,"%s",!std::strcmp(value,"--")?"menu_record_none":"menu_record_rank");
    return lookup().find(key);};
   auto width=[&](const char* value){const auto i=fragment(value);return i<std::size(UiSprites)?height*UiSprites[i].w/UiSprites[i].h:0.f;};
-  float x=200.f-(width(label)+icon+width(" Rank: ")+icon)*.5f;
+  float x=200.f-(width(label)+icon+width(" Rank: ")+gradeWidth)*.5f;
   group(UiMenuRole::CupRecord);const auto firstRecord=out.size();
   auto sprite=[&](unsigned index,float w,float h,uint32_t tint=0xffffffffu){
    const auto begin=out.size();quad(index,(x-200.f)/XScale,(y-120.f+(height-h)*.5f)/YScale,w/XScale,h/YScale,1,tint,{},true);
@@ -712,9 +717,9 @@ public:
    x+=w;
   };
   auto text=[&](const char* value){sprite(fragment(value),width(value),height);};
-  auto recordIcon=[&](unsigned n){
+  auto recordIcon=[&](unsigned n,float w=14.f,float h=14.f){
    const auto& rect=CupRecordIconRects[n];const auto first=out.size();
-   sprite(lookup().find("cup_record_rank_atlas"),icon,icon);
+   sprite(lookup().find("cup_record_rank_atlas"),w,h);
    if(out.size()>first){auto& q=out.back();const float width=q.h*float(rect[2])/float(rect[3]);q.x+=(q.w-width)*.5f;q.w=width;
     q.u0=float(rect[0])/CupRecordAtlasWidth;q.v0=float(rect[1])/CupRecordAtlasHeight;
     q.u1=float(rect[0]+rect[2])/CupRecordAtlasWidth;q.v1=float(rect[1]+rect[3])/CupRecordAtlasHeight;
@@ -726,7 +731,9 @@ public:
   if(trophy>=1&&trophy<=3)recordIcon(trophy-1);
   else{const float next=x+icon;text("--");x=next;}
   text(" Rank: ");
-  if(grade>=1&&grade<=8)recordIcon(grade+2);else text("--");
+  if(stars){
+   for(unsigned i=0;i<stars;++i){recordIcon(5,starWidth,starHeight);if(i+1<stars)x+=starGap;}
+  }else if(grade>=4&&grade<=8)recordIcon(grade+2);else text("--");
   // Centre actual emitted artwork too: a missing record's dashes and a
   // narrow rank glyph need not occupy the complete nominal icon slot.
   float left=400.f,right=0.f;

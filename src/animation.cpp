@@ -458,7 +458,7 @@ void DriverAnimation::write(Model& model,const uint32_t* shown,const int32_t* te
 }
 void DriverAnimation::stepLook(int clip,float frame,unsigned tick,bool active,Vec3 target,
         const C3D_Mtx& seated,bool body,const DriverLookParameters& parameters,
-        const DriverPose& motion,bool handleRelativeBike,float xAxisY,float zAxisY){
+        const DriverPose& motion,bool handleRelativeBike,float xAxisY,float zAxisY,float lookResponse){
     if(lookTickValid_&&lookTick_==tick)return;
     lookTick_=tick;lookTickValid_=true;
     if(!lookCount_||!ready){resetLook();return;}
@@ -476,7 +476,7 @@ void DriverAnimation::stepLook(int clip,float frame,unsigned tick,bool active,Ve
     float world[12];for(unsigned row=0;row<3;++row){world[row*4]=seated.r[row].x;world[row*4+1]=seated.r[row].y;world[row*4+2]=seated.r[row].z;world[row*4+3]=seated.r[row].w;}
     auto a=driverLookTargetAngles(world,palette_.data()+lookHead_*21,target);
     const auto angles=lookMotion_.step(active&&a.valid,body,a.yaw,a.pitch,a.kartYaw,
-        0,vehicleResponse_.angles().pitchSum(),parameters);
+        0,vehicleResponse_.angles().pitchSum(),parameters,lookResponse);
     cachedSettled_=false;setLookAngles(angles.yaw,angles.pitch);
 }
 

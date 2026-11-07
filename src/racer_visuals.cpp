@@ -113,7 +113,7 @@ void RacerVisuals::resetAnimation(){
         r->vehicle.reset();r->vehicle.step(*K::Kart::KartObjectManager::Instance()->object(i+1));
     }
 }
-void RacerVisuals::step(unsigned tick,const RaceItems& items){
+void RacerVisuals::step(unsigned tick,const RaceItems& items,std::span<const DriverCollisionLook> collisions){
     for(unsigned i=0;i<11;++i)if(auto* r=impl_->racers[i].get()){
         auto* kart=K::Kart::KartObjectManager::Instance()->object(i+1);auto& status=kart->status();
         r->vehicle.step(*kart);DriverSignals s;
@@ -136,6 +136,7 @@ void RacerVisuals::step(unsigned tick,const RaceItems& items){
         s.finishType=driverFinishType(rank,K::System::RaceConfig::Instance()->raceScenario().playerCount);
         s.countdown=unsigned(race->stage())<=1;
         driverItemSignals(s,items,i+1);
+        if(i+1<collisions.size())collisions[i+1].apply(s,unsigned(r->choice->character));
         s.blink=(tick+i*13)%180==0;
         r->pose=r->controller.step(s);
         if(r->animation){
@@ -145,7 +146,7 @@ void RacerVisuals::step(unsigned tick,const RaceItems& items){
             r->animation->stepLook(r->animation->find(driverVehicleClipName(r->pose.clipName,r->choice->bike)),r->pose.frame,tick,
                 available&&s.hasLookTarget&&driverLookAllowed(r->pose.clipName,
                     status.onBit(K::Kart::eStatus::InATrick),status.onBit(K::Kart::eStatus::OverZipper)),
-                s.lookTarget,seated,false,parameters,r->pose,s.handleRelativeBike,kart->physics()->pose()[1,0],kart->physics()->pose()[1,2]);
+                s.lookTarget,seated,false,parameters,r->pose,s.handleRelativeBike,kart->physics()->pose()[1,0],kart->physics()->pose()[1,2],s.lookResponse);
         }
         auto advance=[&](DriverAnimation* bank,Impl::Racer::Clock& clock,bool handle){
             if(!bank)return;

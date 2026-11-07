@@ -2,6 +2,7 @@
 #include <memory>
 #include <citro3d.h>
 #include <mkw/math.hpp>
+#include <mkw/driver_collision_look.hpp>
 namespace mkw {
 class Renderer;
 class Model;
@@ -14,7 +15,7 @@ public:
     bool load();
     void reset();
     void resetAnimation();
-    void step(unsigned tick,const RaceItems& items);
+    void step(unsigned tick,const RaceItems& items,std::span<const DriverCollisionLook> collisions={});
     // Poses and culls every opponent for this frame, on the job worker where
     // possible. Call after Renderer::begin; race state must not change until draw.
     void prepare(const Renderer& renderer,const RaceItems& items,Vec3 viewer,unsigned tick,bool fullDetail=false);

@@ -26,6 +26,7 @@ struct DriverSignals {
     bool celebrate=false; // Rising edge: successful-hit fist pump (gut).
     bool blink=false;     // Caller cadence, restored before the random wink change.
     bool hasLookTarget=false;
+    float lookResponse=.7f;
     Vec3 lookTarget{};    // World position requested by the original item actor update.
 };
 struct DriverPose {

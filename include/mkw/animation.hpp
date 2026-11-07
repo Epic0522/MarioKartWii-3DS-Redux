@@ -24,7 +24,7 @@ public:
     // Physics-tick update; independent of visibility and stereo render count.
     void stepLook(int clip,float frame,unsigned tick,bool active,Vec3 target,
         const C3D_Mtx& seated,bool body,const DriverLookParameters& parameters,
-        const DriverPose& motion,bool handleRelativeBike,float xAxisY,float zAxisY);
+        const DriverPose& motion,bool handleRelativeBike,float xAxisY,float zAxisY,float lookResponse=.7f);
     void resetLook(){motionBlendValid_=false;vehicleResponse_.reset();lookMotion_.reset();lookTickValid_=false;cachedSettled_=false;setLookAngles(0,0);}
     DriverLookMotion::Angles lookAngles() const {return lookMotion_.angles();}
     int find(const char* name) const;

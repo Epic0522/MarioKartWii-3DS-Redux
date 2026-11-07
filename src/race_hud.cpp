@@ -34,16 +34,21 @@ namespace mkw {
 namespace {
 // Retail itembox / itemBoxNise materials (layout generated from the BRRES).
 struct BoxMaterial { Renderer* renderer; const Model* model; const ItemBoxLayout* layout;
-    const std::array<std::array<float,6>,300>* inner; C3D_Mtx transform; unsigned frame; bool sparkle; float environmentBlend; };
+    const std::array<std::array<float,6>,300>* inner; C3D_Mtx transform; unsigned frame; bool sparkle; float environmentBlend,opacity=1.f; };
 constexpr float ShellWarningDistance=6000.f;
 float boxEnvironmentBlend(Vec3 position,Vec3 viewer){
     const Vec3 delta=position-viewer;
     // Full retail EnvCamera inside the warning radius, fixed baked UVs far
-    // away. Smoothstep keeps both endpoints continuous without extra passes.
+    // away. Smoothstep supplies the colour crossfade weight.
     const float t=std::clamp((7800.f*7800.f-dot(delta,delta))/(7800.f*7800.f-ShellWarningDistance*ShellWarningDistance),0.f,1.f);
     return t*t*(3.f-2.f*t);
 }
 bool fullBoxDetail(Vec3 position,Vec3 viewer){return boxEnvironmentBlend(position,viewer)>0.f;}
+float boxSparkleBlend(float ratio,float threshold,float environmentBlend){
+    if(threshold<=0.f)return 1.f;
+    const float t=std::clamp((ratio-threshold*.75f)/(threshold*.5f),0.f,1.f);
+    return std::max(environmentBlend,t*t*(3.f-2.f*t));
+}
 constexpr float IdentitySRT[6]={1,0,0,0,1,0};
 uint32_t abgr(const unsigned char (&c)[3]){return 0xff000000u|c[0]|uint32_t(c[1])<<8|uint32_t(c[2])<<16;}
 void bindBox(void* context,std::size_t submesh){
@@ -107,6 +112,14 @@ void bindBox(void* context,std::size_t submesh){
             C3D_TexEnvFunc(e2,C3D_RGB,GPU_SUBTRACT);C3D_TexEnvScale(e2,C3D_RGB,GPU_TEVSCALE_2);
         }
     }
+    if(m.opacity<1.f){
+        // Mix sampled colours, never slide UVs through unrelated texels.
+        auto* coverage=C3D_GetTexEnv(3);
+        C3D_TexEnvColor(coverage,uint32_t(std::lround(255.f*m.opacity))<<24);
+        C3D_TexEnvSrc(coverage,C3D_Alpha,GPU_CONSTANT);C3D_TexEnvFunc(coverage,C3D_Alpha,GPU_REPLACE);
+        C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_SRC_ALPHA,
+            submesh==L.outer?GPU_ONE:GPU_ONE_MINUS_SRC_ALPHA,GPU_ZERO,GPU_ONE);
+    }
 }
 bool outerOnly(void* context,std::size_t submesh){return submesh==static_cast<BoxMaterial*>(context)->layout->outer;}
 bool innerOnly(void* context,std::size_t submesh){return submesh==static_cast<BoxMaterial*>(context)->layout->inner;}
@@ -133,7 +146,6 @@ C3D_Mtx questionBillboard(const Renderer& renderer,const C3D_Mtx& model){
     return result;
 }
 void bakeBoxEnvironment(Model& model,const ItemBoxLayout& layout){
-    if(!model.staticLightingBaked)return;
     for(unsigned shape:{unsigned(layout.inner),unsigned(layout.outer)}){
         const auto& sub=model.submeshes[shape];
         for(unsigned j=sub.first;j<sub.first+sub.count;++j){auto& v=model.vertices[model.indices[j]];const auto n=normalized(v.normal);
@@ -142,16 +154,23 @@ void bakeBoxEnvironment(Model& model,const ItemBoxLayout& layout){
     }
     flushGpuData(model.vertices,model.vertexCount*sizeof(Vertex));
 }
-void drawBox(Renderer& renderer,const Model& model,const ItemBoxLayout& layout,const std::array<std::array<float,6>,300>& inner,const C3D_Mtx& t,unsigned frame,bool sparkle=true,float environmentBlend=1.f){
-    BoxMaterial m{&renderer,&model,&layout,&inner,t,frame,false,environmentBlend};
-    renderer.draw(model,t,false,bindBox,m,innerOnly);
+void drawBox(Renderer& renderer,const Model& model,const ItemBoxLayout& layout,const std::array<std::array<float,6>,300>& inner,const C3D_Mtx& t,unsigned frame,float sparkle=1.f,float environmentBlend=1.f){
+    const float blend=std::clamp(environmentBlend,0.f,1.f);
+    BoxMaterial m{&renderer,&model,&layout,&inner,t,frame,false,0.f};
+    if(blend<1.f)renderer.draw(model,t,false,bindBox,m,innerOnly);
+    if(blend>0.f){m.environmentBlend=1.f;m.opacity=blend;renderer.draw(model,t,false,bindBox,m,innerOnly);}
+    m.opacity=1.f;
     renderer.clearEnvironmentUv();
     const C3D_Mtx question=questionBillboard(renderer,t);
     renderer.draw(model,question,false,bindBox,m,questionOnly);
     renderer.setUvOffset(0,0);
-    renderer.draw(model,t,false,bindBox,m,outerOnly);
-    // Reduced detail drops the additive sparkle pass of distant boxes.
-    if(sparkle){m.sparkle=true;renderer.draw(model,t,false,bindBox,m,outerOnly);}
+    auto outer=[&](float environment,float weight){
+        if(weight<=0.f)return;
+        m.environmentBlend=environment;m.opacity=weight;m.sparkle=false;
+        renderer.draw(model,t,false,bindBox,m,outerOnly);
+        if(sparkle>0.f){m.sparkle=true;m.opacity=weight*sparkle;renderer.draw(model,t,false,bindBox,m,outerOnly);}
+    };
+    outer(0.f,1.f-blend);outer(1.f,blend);
     renderer.clearEnvironmentUv();renderer.setUvOffset(0,0);
 }
 // The fake box mask samples TEX0 through a static SRT; bake it into UV0.
@@ -311,7 +330,7 @@ bool RaceHud::load(){
         // Unlit GPU indices are kept in normal.x; the shared CHR0 pose has identical slots.
         if(bank.gpuSkinned())bank.shareDrawVertices(cloud);
     }
-    if(impl_->models[3])bakeMaskUv(*impl_->models[3],FakeBoxMaterials);
+    if(impl_->models[3]){bakeMaskUv(*impl_->models[3],FakeBoxMaterials);bakeBoxEnvironment(*impl_->models[3],FakeBoxMaterials);}
     if(impl_->staticModels[3]){bakeMaskUv(*impl_->staticModels[3],FakeBoxMaterials);bakeBoxEnvironment(*impl_->staticModels[3],FakeBoxMaterials);}
     if(!battle)for(unsigned i=1;i<=12;++i)valid&=impl_->ranks[i].load(HudRanks[i].path);
     for(unsigned i=0;i<10;++i)valid&=impl_->digits[i].load(HudDigits[i].path);
@@ -536,9 +555,10 @@ void RaceHud::drawWorld(Renderer& renderer,const RaceItems& items,Vec3 viewer,un
         if(!renderer.visible(*impl_->box,t))continue;
         const bool full=fullBoxDetail(pose.position,viewer);
         const auto& model=*impl_->box;
-        const float ratio=quality.reduced&&!full?RenderQuality::screenRatio({model.minimum,model.maximum},t,camera):1.f;
-        if(ratio<quality.minScreenRatio)continue;
-        drawBox(renderer,model,ItemBoxMaterials,ItemBoxInnerSRT,t,tick,full||ratio>=quality.boxSparkleRatio,boxEnvironmentBlend(pose.position,viewer));
+        const float ratio=quality.reduced?RenderQuality::screenRatio({model.minimum,model.maximum},t,camera):1.f;
+        if(!full&&ratio<quality.minScreenRatio)continue;
+        const float environment=boxEnvironmentBlend(pose.position,viewer);
+        drawBox(renderer,model,ItemBoxMaterials,ItemBoxInnerSRT,t,tick,boxSparkleBlend(ratio,quality.boxSparkleRatio,environment),environment);
     }
     // Leave the uniforms as the last drawBox would, whether or not any was drawn.
     if(boxesInRange){renderer.clearEnvironmentUv();renderer.setUvOffset(0,0);}
