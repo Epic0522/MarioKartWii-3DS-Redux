@@ -36,15 +36,10 @@ headers, saves and compiled packages are not supplied.
 
 ## Building
 
-Building is **manual**. There is no build-all script, dependency downloader,
-Makefile, CI build or automatic CIA generator. Banner-only tools are the
-explicit exception; their current status is documented in [HOME-BANNER.md](docs/HOME-BANNER.md). The steps below describe the
+Building is **manual**. Banner-only tools are documented in [HOME-BANNER.md](docs/HOME-BANNER.md). The steps below describe the
 order; the linked references provide the conversion stages, source list and
 compiler settings. They are intended for developers comfortable with the
 3DS toolchain, not as a one-command build recipe.
-
-The current manual procedure has not received a complete fresh-disc build
-verification after the automated drivers were removed.
 
 ### 1. Prepare the tools
 
