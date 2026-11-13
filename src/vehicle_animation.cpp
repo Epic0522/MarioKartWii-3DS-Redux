@@ -266,10 +266,12 @@ C3D_Mtx VehicleAnimation::accessory(const char* name,bool sourceAnimated,unsigne
     evaluate();
     const int index=accessoryIndex(name);if(index<0||!accessorySupported(name))return body_;
     if(index==0&&sourceAnimated){
-        // Wario Bike's original handle_drive already places/tilts the handle
-        // in chassis space (neutral root T(0,99,82), Rx(-32deg)). The other
-        // animated handles have a neutral local root and need handleBase_.
-        return vehicle_==unsigned(Kinoko::Vehicle::Wario_Bike)?body_:handleBase_;
+        // Wario Bike's CHR0 already supplies T(0,99,82) and the handle tilt.
+        // Its native bike display mount is T(0,45,82). Replace that authored
+        // translation without applying the tilt or steering a second time.
+        if(vehicle_==unsigned(Kinoko::Vehicle::Wario_Bike))
+            return multiply(body_,local(displayVec(0x0c)-Vec3{0,99,82}));
+        return handleBase_;
     }
     const unsigned slot=unsigned(index)*4+std::min(instance,3u);
     return accessorySet_>>slot&1?accessories_[slot]:body_;
